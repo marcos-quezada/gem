@@ -1,19 +1,18 @@
 /*
- * Exposes the core hosted AES application, scrap, and shell
- * entry points while leaving windowing and object logic in smaller
- * companion modules.
+ * Exposes the core hosted AES application and scrap entry points while
+ * leaving shell, windowing and object logic in focused companion modules.
  *
  * MIT License (see: LICENSE)
  * Copyright (C) 2026 tomaz stih
  */
 
 #include "aes_internal.h"
+#include "aes_shel.h"
 
 #include "platform/os.h"
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 WORD contrl[12] __attribute__((weak));
 WORD intin[128] __attribute__((weak));
@@ -38,15 +37,6 @@ WORD appl_yield(void);
 WORD scrp_read(char *pscrap);
 WORD scrp_write(char *pscrap);
 WORD scrp_clear(void);
-WORD shel_read(char *cmd, char *tail);
-WORD shel_write(WORD doex, WORD isgr, WORD iscr, char *cmd, char *tail);
-WORD shel_get(char *buf, WORD length);
-WORD shel_put(char *buf, WORD length);
-WORD shel_find(char *path);
-WORD shel_envrn(char **env, char *var);
-WORD shel_rdef(char *lpcmd, char *lpdir);
-WORD shel_wdef(char *lpcmd, char *lpdir);
-
 WORD aes_dequeue_message(WORD msg[8])
 {
     if (msg == NULL) {
@@ -69,7 +59,11 @@ WORD appl_init(void)
         if (aes_state.apps[i].used == 0) {
             /* Reuse only a free positive WORD id; long-lived servers must
              * not wrap into zero, negative ids, or another live app. */
-            WORD candidate = aes_state.next_app_id;
+            WORD candidate = aes_shel_claim_app_id();
+
+            if (candidate <= 0) {
+                candidate = aes_state.next_app_id;
+            }
             if (candidate <= 0)
                 candidate = 1;
             while (aes_find_app_by_id(candidate) != NULL)
@@ -301,142 +295,5 @@ WORD scrp_write(char *pscrap)
 WORD scrp_clear(void)
 {
     aes_state.scrap_path[0] = '\0';
-    return 1;
-}
-
-WORD shel_read(char *cmd, char *tail)
-{
-    if (cmd != NULL) {
-        strcpy(cmd, aes_state.shell_cmd);
-    }
-    if (tail != NULL) {
-        strcpy(tail, aes_state.shell_tail);
-    }
-    return 1;
-}
-
-WORD shel_write(WORD doex, WORD isgr, WORD iscr, char *cmd, char *tail)
-{
-    (void)doex;
-    (void)isgr;
-    (void)iscr;
-
-    if (cmd != NULL) {
-        strncpy(aes_state.shell_cmd, cmd, sizeof(aes_state.shell_cmd) - 1u);
-        aes_state.shell_cmd[sizeof(aes_state.shell_cmd) - 1u] = '\0';
-    }
-    if (tail != NULL) {
-        strncpy(aes_state.shell_tail, tail, sizeof(aes_state.shell_tail) - 1u);
-        aes_state.shell_tail[sizeof(aes_state.shell_tail) - 1u] = '\0';
-    }
-    return 1;
-}
-
-WORD shel_get(char *buf, WORD length)
-{
-    if (aes_state.shell_buf_len == 0) {
-        void *data = NULL;
-        size_t size = 0u;
-        char resolved[260];
-
-        if (aes_try_resolve_path("DESKTOP.INF", resolved, sizeof(resolved)) &&
-            aes_load_file(resolved, &data, &size)) {
-            if (size >= sizeof(aes_state.shell_buf)) {
-                size = sizeof(aes_state.shell_buf) - 1u;
-            }
-            memcpy(aes_state.shell_buf, data, size);
-            aes_state.shell_buf[size] = '\0';
-            aes_state.shell_buf_len = (WORD)size;
-            gem_os_free(data);
-        }
-    }
-
-    if (buf == NULL || length <= 0) {
-        return 0;
-    }
-
-    if ((size_t)length > sizeof(aes_state.shell_buf)) {
-        length = (WORD)sizeof(aes_state.shell_buf);
-    }
-    memcpy(buf, aes_state.shell_buf, (size_t)length);
-    return 1;
-}
-
-WORD shel_put(char *buf, WORD length)
-{
-    int fd;
-
-    if (buf == NULL || length < 0) {
-        return 0;
-    }
-
-    if ((size_t)length >= sizeof(aes_state.shell_buf)) {
-        length = (WORD)(sizeof(aes_state.shell_buf) - 1u);
-    }
-    memcpy(aes_state.shell_buf, buf, (size_t)length);
-    aes_state.shell_buf[length] = '\0';
-    aes_state.shell_buf_len = length;
-
-    fd = gem_os_open_write("bin/resources/desktop.inf");
-    if (fd >= 0) {
-        (void)gem_os_write(fd, aes_state.shell_buf,
-                           (uint32_t)aes_state.shell_buf_len);
-        (void)gem_os_close(fd);
-    }
-
-    return 1;
-}
-
-WORD shel_find(char *path)
-{
-    char resolved[260];
-
-    if (path == NULL) {
-        return 0;
-    }
-    if (aes_try_resolve_path(path, resolved, sizeof(resolved))) {
-        strcpy(path, resolved);
-        return 1;
-    }
-    return 0;
-}
-
-WORD shel_envrn(char **env, char *var)
-{
-    char *value;
-
-    if (env == NULL || var == NULL) {
-        return 0;
-    }
-
-    value = getenv(var);
-    if (value == NULL) {
-        return 0;
-    }
-    *env = value;
-    return 1;
-}
-
-WORD shel_rdef(char *lpcmd, char *lpdir)
-{
-    if (lpcmd != NULL) {
-        strcpy(lpcmd, aes_state.shell_cmd);
-    }
-    if (lpdir != NULL) {
-        strcpy(lpdir, aes_state.shell_dir);
-    }
-    return 1;
-}
-
-WORD shel_wdef(char *lpcmd, char *lpdir)
-{
-    if (lpcmd != NULL) {
-        strncpy(aes_state.shell_cmd, lpcmd, sizeof(aes_state.shell_cmd) - 1u);
-        aes_state.shell_cmd[sizeof(aes_state.shell_cmd) - 1u] = '\0';
-    }
-    if (lpdir != NULL) {
-        strncpy(aes_state.shell_dir, lpdir, sizeof(aes_state.shell_dir) - 1u);
-        aes_state.shell_dir[sizeof(aes_state.shell_dir) - 1u] = '\0';
-    }
     return 1;
 }

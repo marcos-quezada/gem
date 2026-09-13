@@ -8,6 +8,7 @@ target_include_directories(rasta
 )
 
 target_compile_features(rasta PUBLIC c_std_11)
+target_link_libraries(rasta PUBLIC Threads::Threads)
 
 target_compile_options(rasta
     PRIVATE
@@ -21,4 +22,3 @@ target_compile_options(rasta
         $<$<CONFIG:Debug>:-g>
         $<$<CONFIG:Debug>:-fsanitize=address,undefined>
 )
-

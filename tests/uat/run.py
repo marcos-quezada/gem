@@ -35,10 +35,7 @@ class Session:
         self.relay = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.relay.bind(('127.0.0.1', 0))
         self.relay.setblocking(False)
-        self.viewer_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.viewer_socket.bind(('127.0.0.1', 0))
-        self.viewer_port = self.viewer_socket.getsockname()[1]
-        self.viewer_socket.close()
+        self.viewer_port = self.probe_port()
         self.env = dict(os.environ, GEM_VDI_WIDTH='640', GEM_VDI_HEIGHT='400',
                         GEM_RASTA_FRAMEBUFFER=str(self.path / 'framebuffer'),
                         GEM_RASTA_HOST='127.0.0.1',
@@ -50,6 +47,14 @@ class Session:
                         UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1',
                         SDL_VIDEODRIVER=os.environ.get('UAT_SDL_DRIVER', 'dummy'),
                         GEM_SHELL='/bin/sh', PS1='UAT> ', HISTFILE='/dev/null', TERM='dumb', SHELL='/bin/sh')
+
+    @staticmethod
+    def probe_port():
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        return port
 
     def start(self, name, command):
         log = (self.path / (name + '.log')).open('w')
@@ -108,11 +113,18 @@ class Session:
         assert Path(rasta).is_file(), 'Run make to build the pinned Rasta viewer'
         for name in ['socket', 'framebuffer']:
             (self.path / name).unlink(missing_ok=True)
-        self.viewer = self.start('rasta', [rasta, '--inverse', '--width', '640', '--height', '400',
-            '--bpp', '1', '--scale', '1', '--port', str(self.viewer_port),
-            '--framebuffer', self.env['GEM_RASTA_FRAMEBUFFER'], '--cursor', 'off'])
-        self.pause(.3)
-        assert self.viewer.poll() is None, 'Rasta exited; see rasta.log'
+        # The probed port is released before the viewer binds it, so parallel
+        # sessions can collide; a fresh port and viewer resolve that race.
+        for attempt in range(5):
+            self.viewer = self.start('rasta', [rasta, '--inverse', '--width', '640', '--height', '400',
+                '--bpp', '1', '--scale', '1', '--port', str(self.viewer_port),
+                '--framebuffer', self.env['GEM_RASTA_FRAMEBUFFER'], '--cursor', 'off'])
+            self.pause(.3)
+            if self.viewer.poll() is None:
+                break
+            text = (self.path / 'rasta.log').read_text(errors='replace')
+            assert 'Address already in use' in text and attempt < 4, 'Rasta exited; see rasta.log'
+            self.viewer_port = self.probe_port()
         if self.args.mode == 'proxy':
             self.server = self.start('gemd', [self.args.gemd])
             wait_for(lambda: (self.path / 'socket').exists(), 'gemd socket')
@@ -128,6 +140,10 @@ class Session:
         assert self.viewer.poll() is None, 'Rasta died during UAT'
         if self.args.mode == 'proxy':
             assert self.server.poll() is None, 'gemd died during UAT'
+        # A rejected datagram would leave a manually started viewer at its
+        # own defaults, so the subscription GEM sends must always parse.
+        viewer_log = (self.path / 'rasta.log').read_text(errors='replace')
+        assert 'ignoring subscriber reconfigure' not in viewer_log, 'Rasta rejected the GEM subscription'
 
     def close(self):
         for proc in reversed(self.processes):

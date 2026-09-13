@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,627 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+extern char **environ;
+
+enum {
+    GEM_OS_ENV_NAME_MAX = 128,
+    GEM_OS_ENV_VALUE_MAX = 65536,
+    GEM_OS_TAIL_MAX = 127,
+    GEM_OS_ARG_MAX = 32
+};
+
+static int gem_os_env_name(const char *name,
+                           char normalized[GEM_OS_ENV_NAME_MAX])
+{
+    size_t length;
+
+    if (name == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    length = strlen(name);
+    if (length > 0u && name[length - 1u] == '=') {
+        --length;
+    }
+    if (length == 0u || length >= GEM_OS_ENV_NAME_MAX) {
+        errno = EINVAL;
+        return 0;
+    }
+    memcpy(normalized, name, length);
+    normalized[length] = '\0';
+    return 1;
+}
+
+int gem_os_mutex_init(gem_os_mutex_t *mutex)
+{
+    pthread_mutex_t *native;
+
+    if (mutex == NULL || mutex->handle != NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    native = malloc(sizeof(*native));
+    if (native == NULL) {
+        return 0;
+    }
+    if (pthread_mutex_init(native, NULL) != 0) {
+        free(native);
+        return 0;
+    }
+    mutex->handle = native;
+    return 1;
+}
+
+void gem_os_mutex_lock(gem_os_mutex_t *mutex)
+{
+    if (mutex != NULL && mutex->handle != NULL) {
+        (void)pthread_mutex_lock((pthread_mutex_t *)mutex->handle);
+    }
+}
+
+void gem_os_mutex_unlock(gem_os_mutex_t *mutex)
+{
+    if (mutex != NULL && mutex->handle != NULL) {
+        (void)pthread_mutex_unlock((pthread_mutex_t *)mutex->handle);
+    }
+}
+
+void gem_os_mutex_destroy(gem_os_mutex_t *mutex)
+{
+    if (mutex != NULL && mutex->handle != NULL) {
+        pthread_mutex_t *native = (pthread_mutex_t *)mutex->handle;
+
+        (void)pthread_mutex_destroy(native);
+        free(native);
+        mutex->handle = NULL;
+    }
+}
+
+gem_os_pid_t gem_os_getpid(void)
+{
+    return (gem_os_pid_t)getpid();
+}
+
+uint32_t gem_os_getuid(void)
+{
+    return (uint32_t)getuid();
+}
+
+const char *gem_os_getenv_ref(const char *name)
+{
+    char normalized[GEM_OS_ENV_NAME_MAX];
+
+    if (gem_os_env_name(name, normalized) == 0) {
+        return NULL;
+    }
+    return getenv(normalized);
+}
+
+int gem_os_getenv(const char *name, char *dst, size_t dst_size)
+{
+    const char *value = gem_os_getenv_ref(name);
+    size_t length;
+
+    if (value == NULL || dst == NULL || dst_size == 0u) {
+        return 0;
+    }
+    length = strlen(value);
+    if (length >= dst_size) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    memcpy(dst, value, length + 1u);
+    return 1;
+}
+
+static int gem_os_read_process_file(gem_os_pid_t pid, const char *leaf,
+                                    unsigned char **data_out, size_t *size_out)
+{
+    char path[64];
+    unsigned char *data;
+    size_t used = 0u;
+    int fd;
+    int rc;
+
+    if (pid <= 0 || leaf == NULL || data_out == NULL || size_out == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    rc = snprintf(path, sizeof(path), "/proc/%d/%s", pid, leaf);
+    if (rc <= 0 || (size_t)rc >= sizeof(path)) {
+        return 0;
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return 0;
+    }
+    data = malloc(GEM_OS_ENV_VALUE_MAX);
+    if (data == NULL) {
+        (void)close(fd);
+        return 0;
+    }
+    while (used < GEM_OS_ENV_VALUE_MAX) {
+        ssize_t count = read(fd, data + used, GEM_OS_ENV_VALUE_MAX - used);
+
+        if (count > 0) {
+            used += (size_t)count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0) {
+            free(data);
+            (void)close(fd);
+            return 0;
+        }
+        break;
+    }
+    (void)close(fd);
+    *data_out = data;
+    *size_out = used;
+    return 1;
+}
+
+int gem_os_process_getenv(gem_os_pid_t pid, const char *name, char *dst,
+                          size_t dst_size)
+{
+    char normalized[GEM_OS_ENV_NAME_MAX];
+    unsigned char *data;
+    size_t size;
+    size_t offset;
+
+    if (dst == NULL || dst_size == 0u ||
+        gem_os_env_name(name, normalized) == 0 ||
+        gem_os_read_process_file(pid, "environ", &data, &size) == 0) {
+        return 0;
+    }
+    for (offset = 0u; offset < size;) {
+        const char *entry = (const char *)data + offset;
+        size_t remaining = size - offset;
+        size_t length = strnlen(entry, remaining);
+        size_t name_length = strlen(normalized);
+
+        if (length == remaining) {
+            break;
+        }
+        if (length > name_length && entry[name_length] == '=' &&
+            memcmp(entry, normalized, name_length) == 0) {
+            const char *value = entry + name_length + 1u;
+            size_t value_length = length - name_length - 1u;
+
+            if (value_length < dst_size) {
+                memcpy(dst, value, value_length);
+                dst[value_length] = '\0';
+                free(data);
+                return 1;
+            }
+            errno = ENAMETOOLONG;
+            break;
+        }
+        offset += length + 1u;
+    }
+    free(data);
+    return 0;
+}
+
+int gem_os_access(const char *path, int mode)
+{
+    int native_mode;
+
+    if (path == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    switch (mode) {
+        case GEM_OS_ACCESS_EXISTS:
+            native_mode = F_OK;
+            break;
+        case GEM_OS_ACCESS_EXECUTE:
+            native_mode = X_OK;
+            break;
+        case GEM_OS_ACCESS_READ:
+            native_mode = R_OK;
+            break;
+        default:
+            errno = EINVAL;
+            return 0;
+    }
+    return (access(path, native_mode) == 0) ? 1 : 0;
+}
+
+static int gem_os_try_search_path(const char *directory, const char *name,
+                                  int mode, char *out, size_t out_size)
+{
+    char candidate[GEM_OS_PATH_MAX];
+    char absolute[PATH_MAX];
+    const char *dir = directory;
+    int rc;
+
+    if (dir == NULL || dir[0] == '\0') {
+        dir = ".";
+    }
+    if (name[0] == '/') {
+        rc = snprintf(candidate, sizeof(candidate), "%s", name);
+    } else {
+        rc = snprintf(candidate, sizeof(candidate), "%s/%s", dir, name);
+    }
+    if (rc <= 0 || (size_t)rc >= sizeof(candidate) ||
+        gem_os_access(candidate, mode) == 0 ||
+        realpath(candidate, absolute) == NULL || strlen(absolute) >= out_size) {
+        return 0;
+    }
+    strcpy(out, absolute);
+    return 1;
+}
+
+static int gem_os_search_list(const char *list, const char *name, int mode,
+                              char *out, size_t out_size)
+{
+    const char *start;
+
+    if (list == NULL) {
+        return 0;
+    }
+    start = list;
+    for (;;) {
+        const char *end = strchr(start, ':');
+        size_t length = (end != NULL) ? (size_t)(end - start) : strlen(start);
+        char directory[GEM_OS_PATH_MAX];
+
+        if (length < sizeof(directory)) {
+            memcpy(directory, start, length);
+            directory[length] = '\0';
+            if (gem_os_try_search_path(directory, name, mode, out, out_size)) {
+                return 1;
+            }
+        }
+        if (end == NULL) {
+            return 0;
+        }
+        start = end + 1;
+    }
+}
+
+static int gem_os_find_path(const char *name, int mode, char *out,
+                            size_t out_size)
+{
+    const char *home;
+    const char *path;
+    const char *aes_path;
+    char apps[GEM_OS_PATH_MAX];
+    int length;
+
+    if (name == NULL || name[0] == '\0' || out == NULL || out_size == 0u) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (strchr(name, '/') != NULL) {
+        return gem_os_try_search_path(".", name, mode, out, out_size);
+    }
+    if (gem_os_try_search_path(".", name, mode, out, out_size)) {
+        return 1;
+    }
+    home = gem_os_getenv_ref("GEMIX_HOME");
+    if (home != NULL && home[0] != '\0') {
+        if (gem_os_try_search_path(home, name, mode, out, out_size)) {
+            return 1;
+        }
+        length = snprintf(apps, sizeof(apps), "%s/apps", home);
+        if (length > 0 && (size_t)length < sizeof(apps) &&
+            gem_os_try_search_path(apps, name, mode, out, out_size)) {
+            return 1;
+        }
+    }
+    path = gem_os_getenv_ref("PATH");
+    if (gem_os_search_list(path, name, mode, out, out_size)) {
+        return 1;
+    }
+    aes_path = gem_os_getenv_ref("GEM_AES_PATH");
+    return gem_os_search_list(aes_path, name, mode, out, out_size);
+}
+
+int gem_os_find_file(const char *name, char *out, size_t out_size)
+{
+    return gem_os_find_path(name, GEM_OS_ACCESS_READ, out, out_size);
+}
+
+int gem_os_find_executable(const char *name, char *out, size_t out_size)
+{
+    return gem_os_find_path(name, GEM_OS_ACCESS_EXECUTE, out, out_size);
+}
+
+static size_t gem_os_tail_arguments(char *tail, size_t tail_len, char *argv[],
+                                    size_t argv_size)
+{
+    size_t argc = 1u;
+    size_t index = 0u;
+
+    while (index < tail_len && argc + 1u < argv_size) {
+        char quote = '\0';
+        char *write;
+
+        while (index < tail_len &&
+               (tail[index] == ' ' || tail[index] == '\t')) {
+            ++index;
+        }
+        if (index == tail_len) {
+            break;
+        }
+        write = tail + index;
+        argv[argc++] = write;
+        while (index < tail_len) {
+            char value = tail[index++];
+
+            if (quote == '\0' && (value == '\'' || value == '"')) {
+                quote = value;
+                continue;
+            }
+            if (quote != '\0' && value == quote) {
+                quote = '\0';
+                continue;
+            }
+            if (quote == '\0' && (value == ' ' || value == '\t')) {
+                break;
+            }
+            *write++ = value;
+        }
+        *write = '\0';
+    }
+    argv[argc] = NULL;
+    return argc;
+}
+
+static void gem_os_tail_hex(const unsigned char *tail, size_t tail_len,
+                            char hex[GEM_OS_TAIL_MAX * 2u + 1u])
+{
+    static const char digits[] = "0123456789abcdef";
+    size_t index;
+
+    for (index = 0u; index < tail_len; ++index) {
+        hex[index * 2u] = digits[tail[index] >> 4];
+        hex[index * 2u + 1u] = digits[tail[index] & 15u];
+    }
+    hex[tail_len * 2u] = '\0';
+}
+
+static int gem_os_shell_env_entry(const char *entry)
+{
+    static const char *names[] = {"GEM_SHEL_CMD", "GEM_SHEL_TAIL",
+                                  "GEM_SHEL_TAIL_HEX", "GEM_SHEL_TAIL_LEN",
+                                  "GEM_APPL_ID"};
+    size_t index;
+
+    for (index = 0u; index < sizeof(names) / sizeof(names[0]); ++index) {
+        size_t length = strlen(names[index]);
+
+        if (strncmp(entry, names[index], length) == 0 && entry[length] == '=') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int gem_os_spawn_gem(const char *path, const char *cmd, const void *tail,
+                     size_t tail_len, int appl_id, gem_os_pid_t *out_pid)
+{
+    char resolved[GEM_OS_PATH_MAX];
+    char tail_copy[GEM_OS_TAIL_MAX + 1u];
+    char command_env[sizeof("GEM_SHEL_CMD=") + 255u];
+    char tail_env[sizeof("GEM_SHEL_TAIL=") + GEM_OS_TAIL_MAX];
+    char tail_hex_env[sizeof("GEM_SHEL_TAIL_HEX=") + GEM_OS_TAIL_MAX * 2u];
+    char tail_length_env[sizeof("GEM_SHEL_TAIL_LEN=") + 15u];
+    char app_id_env[sizeof("GEM_APPL_ID=") + 15u];
+    char tail_hex[GEM_OS_TAIL_MAX * 2u + 1u];
+    char *argv[GEM_OS_ARG_MAX];
+    char **child_env;
+    size_t child_env_count = 0u;
+    size_t environment_count = 0u;
+    size_t index;
+    int error_pipe[2];
+    pid_t pid;
+    int child_error = 0;
+    ssize_t error_size;
+
+    if (path == NULL || cmd == NULL || tail_len > GEM_OS_TAIL_MAX ||
+        (tail == NULL && tail_len != 0u) || out_pid == NULL || appl_id <= 0 ||
+        strlen(cmd) > 255u ||
+        gem_os_find_executable(path, resolved, sizeof(resolved)) == 0) {
+        return 0;
+    }
+    if (tail_len > 0u) {
+        memcpy(tail_copy, tail, tail_len);
+    }
+    tail_copy[tail_len] = '\0';
+    gem_os_tail_hex((const unsigned char *)tail_copy, tail_len, tail_hex);
+    (void)snprintf(command_env, sizeof(command_env), "GEM_SHEL_CMD=%s", cmd);
+    memcpy(tail_env, "GEM_SHEL_TAIL=", sizeof("GEM_SHEL_TAIL=") - 1u);
+    if (tail_len != 0u) {
+        memcpy(tail_env + sizeof("GEM_SHEL_TAIL=") - 1u, tail, tail_len);
+    }
+    tail_env[sizeof("GEM_SHEL_TAIL=") - 1u + tail_len] = '\0';
+    (void)snprintf(tail_hex_env, sizeof(tail_hex_env), "GEM_SHEL_TAIL_HEX=%s",
+                   tail_hex);
+    (void)snprintf(tail_length_env, sizeof(tail_length_env),
+                   "GEM_SHEL_TAIL_LEN=%zu", tail_len);
+    (void)snprintf(app_id_env, sizeof(app_id_env), "GEM_APPL_ID=%d", appl_id);
+    argv[0] = resolved;
+    (void)gem_os_tail_arguments(tail_copy, tail_len, argv, GEM_OS_ARG_MAX);
+    while (environ[environment_count] != NULL) {
+        ++environment_count;
+    }
+    child_env = malloc((environment_count + 6u) * sizeof(*child_env));
+    if (child_env == NULL) {
+        return 0;
+    }
+    for (index = 0u; index < environment_count; ++index) {
+        if (gem_os_shell_env_entry(environ[index]) == 0) {
+            child_env[child_env_count++] = environ[index];
+        }
+    }
+    child_env[child_env_count++] = command_env;
+    child_env[child_env_count++] = tail_env;
+    child_env[child_env_count++] = tail_hex_env;
+    child_env[child_env_count++] = tail_length_env;
+    child_env[child_env_count++] = app_id_env;
+    child_env[child_env_count] = NULL;
+    if (pipe2(error_pipe, O_CLOEXEC) != 0) {
+        free(child_env);
+        return 0;
+    }
+    pid = fork();
+    if (pid < 0) {
+        (void)close(error_pipe[0]);
+        (void)close(error_pipe[1]);
+        free(child_env);
+        return 0;
+    }
+    if (pid == 0) {
+        (void)close(error_pipe[0]);
+        execve(resolved, argv, child_env);
+        child_error = errno;
+        do {
+            error_size =
+                write(error_pipe[1], &child_error, sizeof(child_error));
+        } while (error_size < 0 && errno == EINTR);
+        _exit(127);
+    }
+    (void)close(error_pipe[1]);
+    do {
+        error_size = read(error_pipe[0], &child_error, sizeof(child_error));
+    } while (error_size < 0 && errno == EINTR);
+    (void)close(error_pipe[0]);
+    free(child_env);
+    if (error_size != 0) {
+        (void)waitpid(pid, NULL, 0);
+        if (error_size > 0) {
+            errno = child_error;
+        }
+        return 0;
+    }
+    *out_pid = (gem_os_pid_t)pid;
+    return 1;
+}
+
+static int gem_os_hex_digit(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+    }
+    return -1;
+}
+
+static int gem_os_process_tail(gem_os_pid_t pid, unsigned char *tail,
+                               size_t tail_size, size_t *tail_len)
+{
+    char length_text[16];
+    char hex[GEM_OS_TAIL_MAX * 2u + 1u];
+    char *end;
+    unsigned long length;
+    size_t index;
+
+    if (gem_os_process_getenv(pid, "GEM_SHEL_TAIL_LEN", length_text,
+                              sizeof(length_text)) == 0) {
+        return 0;
+    }
+    errno = 0;
+    length = strtoul(length_text, &end, 10);
+    if (errno != 0 || *end != '\0' || length > GEM_OS_TAIL_MAX ||
+        length > tail_size ||
+        gem_os_process_getenv(pid, "GEM_SHEL_TAIL_HEX", hex, sizeof(hex)) ==
+            0 ||
+        strlen(hex) != length * 2u) {
+        return 0;
+    }
+    for (index = 0u; index < (size_t)length; ++index) {
+        int high = gem_os_hex_digit(hex[index * 2u]);
+        int low = gem_os_hex_digit(hex[index * 2u + 1u]);
+
+        if (high < 0 || low < 0) {
+            return 0;
+        }
+        tail[index] = (unsigned char)((high << 4) | low);
+    }
+    *tail_len = (size_t)length;
+    return 1;
+}
+
+int gem_os_process_launch(gem_os_pid_t pid, char *cmd, size_t cmd_size,
+                          void *tail, size_t tail_size, size_t *tail_len)
+{
+    unsigned char *data;
+    unsigned char *tail_bytes = (unsigned char *)tail;
+    size_t size;
+    size_t first;
+    size_t offset;
+    size_t used = 0u;
+
+    if (cmd == NULL || cmd_size == 0u || tail == NULL || tail_len == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (gem_os_process_getenv(pid, "GEM_SHEL_CMD", cmd, cmd_size) != 0 &&
+        gem_os_process_tail(pid, tail_bytes, tail_size, tail_len) != 0) {
+        return 1;
+    }
+    if (gem_os_read_process_file(pid, "cmdline", &data, &size) == 0 ||
+        size == 0u) {
+        return 0;
+    }
+    first = strnlen((const char *)data, size);
+    if (first == size || first >= cmd_size) {
+        free(data);
+        return 0;
+    }
+    memcpy(cmd, data, first + 1u);
+    offset = first + 1u;
+    while (offset < size && used < tail_size) {
+        size_t length = strnlen((const char *)data + offset, size - offset);
+
+        if (length == 0u || length == size - offset) {
+            break;
+        }
+        if (used != 0u) {
+            tail_bytes[used++] = ' ';
+            if (used == tail_size) {
+                break;
+            }
+        }
+        if (length > tail_size - used) {
+            length = tail_size - used;
+        }
+        memcpy(tail_bytes + used, data + offset, length);
+        used += length;
+        offset += length + 1u;
+    }
+    free(data);
+    *tail_len = used;
+    return 1;
+}
+
+int gem_os_reap_process(gem_os_pid_t pid)
+{
+    pid_t result;
+
+    if (pid <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    do {
+        result = waitpid((pid_t)pid, NULL, WNOHANG);
+    } while (result < 0 && errno == EINTR);
+    if (result == 0) {
+        return 0;
+    }
+    return (result == (pid_t)pid) ? 1 : -1;
+}
 
 int gem_os_init(void)
 {
@@ -199,6 +821,38 @@ int gem_os_mkdir(const char *path)
     return (mkdir(path, 0755) == 0) ? 1 : 0;
 }
 
+int gem_os_mkdir_p(const char *path)
+{
+    char copy[GEM_OS_PATH_MAX];
+    char *cursor;
+    size_t length;
+
+    if (path == NULL || path[0] != '/') {
+        errno = EINVAL;
+        return 0;
+    }
+    length = strlen(path);
+    if (length == 0u || length >= sizeof(copy)) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    memcpy(copy, path, length + 1u);
+    for (cursor = copy + 1; *cursor != '\0'; ++cursor) {
+        if (*cursor != '/') {
+            continue;
+        }
+        *cursor = '\0';
+        if (mkdir(copy, 0700) != 0 && errno != EEXIST) {
+            return 0;
+        }
+        *cursor = '/';
+    }
+    if (mkdir(copy, 0700) != 0 && errno != EEXIST) {
+        return 0;
+    }
+    return 1;
+}
+
 int gem_os_rmdir(const char *path)
 {
     if (path == NULL) {
@@ -226,6 +880,335 @@ int gem_os_rename(const char *old_path, const char *new_path)
     return (rename(old_path, new_path) == 0) ? 1 : 0;
 }
 
+static int gem_os_copy_regular_path(const char *source,
+                                    const char *destination, mode_t mode)
+{
+    char buffer[16384];
+    int input;
+    int output;
+    int okay = 1;
+
+    input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) {
+        return 0;
+    }
+    output = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                  mode & 0777);
+    if (output < 0) {
+        (void)close(input);
+        return 0;
+    }
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        size_t written = 0u;
+
+        if (count == 0) {
+            break;
+        }
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            okay = 0;
+            break;
+        }
+        while (written < (size_t)count) {
+            ssize_t result =
+                write(output, buffer + written, (size_t)count - written);
+
+            if (result > 0) {
+                written += (size_t)result;
+            } else if (result < 0 && errno == EINTR) {
+                continue;
+            } else {
+                okay = 0;
+                break;
+            }
+        }
+        if (okay == 0) {
+            break;
+        }
+    }
+    if (okay != 0 && (fsync(output) != 0 || fchmod(output, mode & 0777) != 0)) {
+        okay = 0;
+    }
+    if (close(input) != 0) {
+        okay = 0;
+    }
+    if (close(output) != 0) {
+        okay = 0;
+    }
+    if (okay == 0) {
+        (void)unlink(destination);
+    }
+    return okay;
+}
+
+static int gem_os_copy_path_join(const char *directory, const char *name,
+                                 char *out, size_t out_size)
+{
+    int length = snprintf(out, out_size, "%s/%s", directory, name);
+
+    if (length <= 0 || (size_t)length >= out_size) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    return 1;
+}
+
+static int gem_os_copy_entry_path(const char *source, const char *destination)
+{
+    struct stat info;
+
+    if (lstat(source, &info) != 0) {
+        return 0;
+    }
+    if (S_ISREG(info.st_mode)) {
+        return gem_os_copy_regular_path(source, destination, info.st_mode);
+    }
+    if (S_ISLNK(info.st_mode)) {
+        char target[PATH_MAX];
+        ssize_t length = readlink(source, target, sizeof(target) - 1u);
+
+        if (length < 0 || (size_t)length >= sizeof(target) - 1u) {
+            return 0;
+        }
+        target[length] = '\0';
+        return symlink(target, destination) == 0;
+    }
+    if (S_ISDIR(info.st_mode)) {
+        DIR *directory;
+        struct dirent *entry;
+        int okay = 1;
+
+        if (mkdir(destination, (info.st_mode & 0777) | S_IRWXU) != 0) {
+            return 0;
+        }
+        directory = opendir(source);
+        if (directory == NULL) {
+            (void)rmdir(destination);
+            return 0;
+        }
+        while ((entry = readdir(directory)) != NULL) {
+            char source_child[PATH_MAX];
+            char destination_child[PATH_MAX];
+
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            if (gem_os_copy_path_join(source, entry->d_name, source_child,
+                                      sizeof(source_child)) == 0 ||
+                gem_os_copy_path_join(destination, entry->d_name,
+                                      destination_child,
+                                      sizeof(destination_child)) == 0 ||
+                gem_os_copy_entry_path(source_child, destination_child) == 0) {
+                okay = 0;
+                break;
+            }
+        }
+        if (closedir(directory) != 0) {
+            okay = 0;
+        }
+        if (okay != 0 && chmod(destination, info.st_mode & 0777) != 0) {
+            okay = 0;
+        }
+        return okay;
+    }
+    errno = ENOTSUP;
+    return 0;
+}
+
+static int gem_os_parent_path(const char *path, char *parent,
+                              size_t parent_size)
+{
+    char *slash;
+    size_t length;
+
+    if (path == NULL || parent == NULL || parent_size == 0u) {
+        errno = EINVAL;
+        return 0;
+    }
+    length = strlen(path);
+    if (length == 0u || length >= parent_size) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    memcpy(parent, path, length + 1u);
+    slash = strrchr(parent, '/');
+    if (slash == NULL) {
+        return gem_os_getcwd(parent, parent_size);
+    }
+    if (slash == parent) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return 1;
+}
+
+int gem_os_move_path(const char *old_path, const char *new_path)
+{
+    char old_parent[PATH_MAX];
+    char new_parent[PATH_MAX];
+    char temporary[PATH_MAX];
+    unsigned int attempt;
+    int saved_error;
+
+    if (old_path == NULL || new_path == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (rename(old_path, new_path) == 0) {
+        return 1;
+    }
+    if (errno != EXDEV ||
+        gem_os_parent_path(old_path, old_parent, sizeof(old_parent)) == 0 ||
+        gem_os_parent_path(new_path, new_parent, sizeof(new_parent)) == 0) {
+        return 0;
+    }
+    for (attempt = 0u; attempt < 100u; ++attempt) {
+        int length = snprintf(temporary, sizeof(temporary),
+                              "%s/.gem-move-%lu-%u", old_parent,
+                              (unsigned long)getpid(), attempt);
+
+        if (length <= 0 || (size_t)length >= sizeof(temporary)) {
+            errno = ENAMETOOLONG;
+            return 0;
+        }
+        struct stat temporary_info;
+
+        if (lstat(temporary, &temporary_info) == 0) {
+            continue;
+        }
+        if (errno != ENOENT) {
+            return 0;
+        }
+        if (rename(old_path, temporary) == 0) {
+            break;
+        }
+        return 0;
+    }
+    if (attempt == 100u) {
+        return 0;
+    }
+    if (gem_os_copy_entry_path(temporary, new_path) == 0) {
+        saved_error = errno;
+        (void)rename(temporary, old_path);
+        (void)gem_os_remove_tree_under(new_path, new_parent);
+        errno = saved_error;
+        return 0;
+    }
+    /* The original name is already gone and the complete destination exists.
+     * A cleanup failure can leave only a hidden source-side staging entry;
+     * retaining the destination avoids data loss after a partial removal. */
+    (void)gem_os_remove_tree_under(temporary, old_parent);
+    return 1;
+}
+
+int gem_os_read_file(const char *path, char *buf, size_t buf_size,
+                     size_t *size_out)
+{
+    size_t used = 0u;
+    int fd;
+
+    if (path == NULL || buf == NULL || buf_size == 0u) {
+        errno = EINVAL;
+        return 0;
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return 0;
+    }
+    while (used + 1u < buf_size) {
+        ssize_t count = read(fd, buf + used, buf_size - used - 1u);
+
+        if (count > 0) {
+            used += (size_t)count;
+        } else if (count == 0) {
+            break;
+        } else if (errno != EINTR) {
+            (void)close(fd);
+            return 0;
+        }
+    }
+    if (used + 1u == buf_size) {
+        char extra;
+        ssize_t count;
+
+        do {
+            count = read(fd, &extra, 1u);
+        } while (count < 0 && errno == EINTR);
+        if (count != 0) {
+            (void)close(fd);
+            errno = EOVERFLOW;
+            return 0;
+        }
+    }
+    if (close(fd) != 0) {
+        return 0;
+    }
+    buf[used] = '\0';
+    if (size_out != NULL) {
+        *size_out = used;
+    }
+    return 1;
+}
+
+int gem_os_write_file_atomic(const char *path, const void *data, size_t size)
+{
+    char temporary[GEM_OS_PATH_MAX];
+    unsigned int attempt;
+    int fd = -1;
+    size_t used = 0u;
+
+    if (path == NULL || data == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    for (attempt = 0u; attempt < 100u; ++attempt) {
+        int length = snprintf(temporary, sizeof(temporary), "%s.tmp.%lu.%u",
+                              path, (unsigned long)getpid(), attempt);
+
+        if (length <= 0 || (size_t)length >= sizeof(temporary)) {
+            errno = ENAMETOOLONG;
+            return 0;
+        }
+        fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            break;
+        }
+        if (errno != EEXIST) {
+            return 0;
+        }
+    }
+    if (fd < 0) {
+        return 0;
+    }
+    while (used < size) {
+        ssize_t count = write(fd, (const char *)data + used, size - used);
+
+        if (count > 0) {
+            used += (size_t)count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else {
+            (void)close(fd);
+            (void)unlink(temporary);
+            return 0;
+        }
+    }
+    if (fsync(fd) != 0 || close(fd) != 0) {
+        (void)unlink(temporary);
+        return 0;
+    }
+    if (rename(temporary, path) != 0) {
+        (void)unlink(temporary);
+        return 0;
+    }
+    return 1;
+}
+
 static int gem_os_fill_info_from_stat(const char *name, const struct stat *st,
                                       gem_os_file_info_t *info)
 {
@@ -238,6 +1221,9 @@ static int gem_os_fill_info_from_stat(const char *name, const struct stat *st,
     info->mtime_ms = (uint64_t)st->st_mtim.tv_sec * 1000u +
                      (uint64_t)st->st_mtim.tv_nsec / 1000000u;
     info->is_directory = S_ISDIR(st->st_mode) ? 1 : 0;
+    info->is_executable =
+        ((st->st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0) ? 1 : 0;
+    info->is_symlink = S_ISLNK(st->st_mode) ? 1 : 0;
     info->is_hidden = (name != NULL && name[0] == '.') ? 1 : 0;
     info->is_read_only = ((st->st_mode & S_IWUSR) == 0) ? 1 : 0;
     return 1;
@@ -255,6 +1241,391 @@ int gem_os_stat_path(const char *path, gem_os_file_info_t *info)
         return 0;
     }
     return gem_os_fill_info_from_stat(path, &st, info);
+}
+
+int gem_os_lstat_path(const char *path, gem_os_file_info_t *info)
+{
+    struct stat st;
+
+    if (path == NULL || info == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (lstat(path, &st) != 0) {
+        return 0;
+    }
+    return gem_os_fill_info_from_stat(path, &st, info);
+}
+
+int gem_os_path_exists(const char *path)
+{
+    struct stat st;
+
+    return path != NULL && lstat(path, &st) == 0;
+}
+
+int gem_os_same_device(const char *left_path, const char *right_path)
+{
+    struct stat left;
+    struct stat right;
+
+    if (left_path == NULL || right_path == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (lstat(left_path, &left) != 0 || lstat(right_path, &right) != 0) {
+        return 0;
+    }
+    return left.st_dev == right.st_dev;
+}
+
+static int gem_os_path_prefix(const char *root, const char *path)
+{
+    size_t length;
+
+    if (root == NULL || path == NULL) {
+        return 0;
+    }
+    length = strlen(root);
+    if (strncmp(root, path, length) != 0) {
+        return 0;
+    }
+    return length == 1u || path[length] == '\0' || path[length] == '/';
+}
+
+int gem_os_mount_for_path(const char *path, char *out, size_t out_size)
+{
+    struct stat source_stat;
+    char resolved[PATH_MAX];
+    char parent[PATH_MAX];
+    char best[PATH_MAX] = "";
+    char name[PATH_MAX];
+    char *slash;
+    FILE *mounts;
+    struct mntent *mount;
+    int length;
+
+    if (path == NULL || out == NULL || out_size == 0u ||
+        strlen(path) >= sizeof(parent)) {
+        return 0;
+    }
+    strcpy(parent, path);
+    slash = strrchr(parent, '/');
+    if (slash == NULL || slash[1] == '\0' ||
+        strlen(slash + 1) >= sizeof(name)) {
+        return 0;
+    }
+    strcpy(name, slash + 1);
+    if (slash == parent) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    if (realpath(parent, resolved) == NULL) {
+        return 0;
+    }
+    length = snprintf(parent, sizeof(parent), strcmp(resolved, "/") == 0
+                                                  ? "/%s"
+                                                  : "%s/%s",
+                      resolved, name);
+    if (length <= 0 || (size_t)length >= sizeof(parent) ||
+        lstat(parent, &source_stat) != 0) {
+        return 0;
+    }
+    strcpy(resolved, parent);
+    mounts = setmntent("/proc/mounts", "r");
+    if (mounts == NULL) {
+        return 0;
+    }
+    while ((mount = getmntent(mounts)) != NULL) {
+        struct stat mount_stat;
+        size_t current_length;
+
+        if (mount->mnt_dir == NULL ||
+            gem_os_path_prefix(mount->mnt_dir, resolved) == 0 ||
+            stat(mount->mnt_dir, &mount_stat) != 0 ||
+            mount_stat.st_dev != source_stat.st_dev) {
+            continue;
+        }
+        current_length = strlen(mount->mnt_dir);
+        if (current_length > strlen(best) && current_length < sizeof(best)) {
+            memcpy(best, mount->mnt_dir, current_length + 1u);
+        }
+    }
+    (void)endmntent(mounts);
+    if (best[0] == '\0' || strlen(best) >= out_size) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    strcpy(out, best);
+    return 1;
+}
+
+int gem_os_resolve_under(const char *path, const char *allowed_root, char *out,
+                         size_t out_size)
+{
+    char root[PATH_MAX];
+    char resolved[PATH_MAX];
+    size_t length;
+
+    if (path == NULL || allowed_root == NULL || out == NULL || out_size == 0u ||
+        realpath(allowed_root, root) == NULL || realpath(path, resolved) == NULL ||
+        gem_os_path_prefix(root, resolved) == 0) {
+        return 0;
+    }
+    length = strlen(resolved);
+    if (length >= out_size) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    memcpy(out, resolved, length + 1u);
+    return 1;
+}
+
+int gem_os_resolve_entry_under(const char *path, const char *allowed_root,
+                               char *out, size_t out_size)
+{
+    char root[PATH_MAX];
+    char parent[PATH_MAX];
+    char resolved_parent[PATH_MAX];
+    char name[PATH_MAX];
+    char *slash;
+    struct stat st;
+    int length;
+
+    if (path == NULL || allowed_root == NULL || out == NULL || out_size == 0u ||
+        strlen(path) >= sizeof(parent) || realpath(allowed_root, root) == NULL) {
+        return 0;
+    }
+    strcpy(parent, path);
+    slash = strrchr(parent, '/');
+    if (slash == NULL || slash[1] == '\0' ||
+        strlen(slash + 1) >= sizeof(name)) {
+        errno = EINVAL;
+        return 0;
+    }
+    strcpy(name, slash + 1);
+    if (slash == parent) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    if (realpath(parent, resolved_parent) == NULL ||
+        gem_os_path_prefix(root, resolved_parent) == 0) {
+        return 0;
+    }
+    length = snprintf(out, out_size, strcmp(resolved_parent, "/") == 0
+                                         ? "/%s"
+                                         : "%s/%s",
+                      resolved_parent, name);
+    if (length <= 0 || (size_t)length >= out_size || lstat(out, &st) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+static int gem_os_remove_tree_at(int parent_fd, const char *name)
+{
+    struct stat st;
+
+    if (fstatat(parent_fd, name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        return 0;
+    }
+    if (S_ISDIR(st.st_mode) != 0) {
+        int child_fd = openat(parent_fd, name,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        DIR *dir;
+        struct dirent *entry;
+        int okay = 1;
+
+        if (child_fd < 0) {
+            return 0;
+        }
+        dir = fdopendir(child_fd);
+        if (dir == NULL) {
+            (void)close(child_fd);
+            return 0;
+        }
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            if (gem_os_remove_tree_at(dirfd(dir), entry->d_name) == 0) {
+                okay = 0;
+                break;
+            }
+        }
+        (void)closedir(dir);
+        return okay != 0 && unlinkat(parent_fd, name, AT_REMOVEDIR) == 0;
+    }
+    return unlinkat(parent_fd, name, 0) == 0;
+}
+
+int gem_os_remove_tree_under(const char *path, const char *allowed_root)
+{
+    char root[PATH_MAX];
+    char resolved[PATH_MAX];
+    char relative[PATH_MAX];
+    char *part;
+    char *next;
+    char *save = NULL;
+    struct stat st;
+    int directory_fd;
+
+    if (path == NULL || allowed_root == NULL ||
+        realpath(allowed_root, root) == NULL || lstat(path, &st) != 0) {
+        return 0;
+    }
+    if (S_ISLNK(st.st_mode) != 0) {
+        char parent[PATH_MAX];
+        char *slash;
+
+        if (strlen(path) >= sizeof(parent)) {
+            errno = ENAMETOOLONG;
+            return 0;
+        }
+        strcpy(parent, path);
+        slash = strrchr(parent, '/');
+        if (slash == NULL) {
+            errno = EINVAL;
+            return 0;
+        }
+        if (slash == parent) {
+            slash[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+        if (realpath(parent, resolved) == NULL ||
+            gem_os_path_prefix(root, resolved) == 0) {
+            return 0;
+        }
+        return unlink(path) == 0;
+    }
+    if (realpath(path, resolved) == NULL || strcmp(root, resolved) == 0 ||
+        gem_os_path_prefix(root, resolved) == 0) {
+        errno = EINVAL;
+        return 0;
+    }
+    if (strlen(resolved) >= sizeof(relative)) {
+        errno = ENAMETOOLONG;
+        return 0;
+    }
+    if (strcmp(root, "/") == 0) {
+        strcpy(relative, resolved + 1);
+    } else {
+        strcpy(relative, resolved + strlen(root) + 1u);
+    }
+    directory_fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory_fd < 0) {
+        return 0;
+    }
+    part = strtok_r(relative, "/", &save);
+    if (part == NULL) {
+        (void)close(directory_fd);
+        return 0;
+    }
+    next = strtok_r(NULL, "/", &save);
+    while (next != NULL) {
+        int next_fd = openat(directory_fd, part,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+
+        (void)close(directory_fd);
+        if (next_fd < 0) {
+            return 0;
+        }
+        directory_fd = next_fd;
+        part = next;
+        next = strtok_r(NULL, "/", &save);
+    }
+    {
+        int result = gem_os_remove_tree_at(directory_fd, part);
+
+        (void)close(directory_fd);
+        return result;
+    }
+}
+
+int gem_os_local_timestamp(char *out, size_t out_size)
+{
+    time_t now;
+    struct tm local;
+
+    if (out == NULL || out_size == 0u) {
+        errno = EINVAL;
+        return 0;
+    }
+    now = time(NULL);
+    if (now == (time_t)-1 || localtime_r(&now, &local) == NULL) {
+        return 0;
+    }
+    return strftime(out, out_size, "%Y-%m-%dT%H:%M:%S", &local) != 0u;
+}
+
+int gem_os_format_timestamp(int64_t seconds, const char *format, char *out,
+                            size_t out_size)
+{
+    time_t value = (time_t)seconds;
+    struct tm local;
+
+    if (format == NULL || out == NULL || out_size == 0u ||
+        localtime_r(&value, &local) == NULL) {
+        return 0;
+    }
+    return strftime(out, out_size, format, &local) != 0u;
+}
+
+int gem_os_mount_iter_open(gem_os_mount_iter_t *iter)
+{
+    FILE *mounts;
+
+    if (iter == NULL) {
+        errno = EINVAL;
+        return 0;
+    }
+    mounts = setmntent("/proc/mounts", "r");
+    if (mounts == NULL) {
+        return 0;
+    }
+    iter->handle = mounts;
+    return 1;
+}
+
+int gem_os_mount_iter_read(gem_os_mount_iter_t *iter, char *path,
+                           size_t path_size)
+{
+    struct mntent *mount;
+    size_t length;
+
+    if (iter == NULL || iter->handle == NULL || path == NULL ||
+        path_size == 0u) {
+        errno = EINVAL;
+        return 0;
+    }
+    for (;;) {
+        mount = getmntent((FILE *)iter->handle);
+        if (mount == NULL) {
+            return 0;
+        }
+        if (mount->mnt_dir == NULL) {
+            continue;
+        }
+        length = strlen(mount->mnt_dir);
+        if (length < path_size) {
+            break;
+        }
+    }
+    memcpy(path, mount->mnt_dir, length + 1u);
+    return 1;
+}
+
+void gem_os_mount_iter_close(gem_os_mount_iter_t *iter)
+{
+    if (iter == NULL || iter->handle == NULL) {
+        return;
+    }
+    (void)endmntent((FILE *)iter->handle);
+    iter->handle = NULL;
 }
 
 int gem_os_dir_open(const char *path, gem_os_dir_t *dir)
@@ -307,7 +1678,7 @@ int gem_os_dir_read(gem_os_dir_t *dir, gem_os_dirent_t *entry)
         if (rc < 0 || (size_t)rc >= sizeof(full_path)) {
             continue;
         }
-        if (stat(full_path, &st) != 0) {
+        if (lstat(full_path, &st) != 0) {
             continue;
         }
         if (gem_os_fill_info_from_stat(dent->d_name, &st, &entry->info) != 0) {
@@ -367,321 +1738,4 @@ int gem_os_set_read_only(const char *path, int read_only)
         mode |= S_IWUSR;
     }
     return (chmod(path, mode) == 0) ? 1 : 0;
-}
-
-static int gem_os_should_expose_mount(const struct mntent *mnt)
-{
-    static const char *const ignored_fs[] = {
-        "proc",   "sysfs",   "tmpfs",    "devtmpfs",    "devpts",
-        "cgroup", "cgroup2", "overlay",  "squashfs",    "nsfs",
-        "mqueue", "debugfs", "tracefs",  "securityfs",  "pstore",
-        "autofs", "fusectl", "configfs", "binfmt_misc", "ramfs"};
-    size_t i;
-
-    if (mnt == NULL || mnt->mnt_dir == NULL || mnt->mnt_type == NULL) {
-        return 0;
-    }
-    if (strcmp(mnt->mnt_dir, "/") == 0) {
-        return 1;
-    }
-    if (strncmp(mnt->mnt_dir, "/snap/", 6) == 0 ||
-        strncmp(mnt->mnt_dir, "/proc", 5) == 0 ||
-        strncmp(mnt->mnt_dir, "/sys", 4) == 0 ||
-        strncmp(mnt->mnt_dir, "/dev", 4) == 0 ||
-        strncmp(mnt->mnt_dir, "/run", 4) == 0) {
-        return 0;
-    }
-    for (i = 0; i < sizeof(ignored_fs) / sizeof(ignored_fs[0]); ++i) {
-        if (strcmp(mnt->mnt_type, ignored_fs[i]) == 0) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static void gem_os_capitalize_label(char *label, size_t size)
-{
-    size_t i;
-    int new_word = 1;
-
-    if (label == NULL || size == 0u) {
-        return;
-    }
-
-    for (i = 0; i < size && label[i] != '\0'; ++i) {
-        if (label[i] == ' ' || label[i] == '_' || label[i] == '-') {
-            new_word = 1;
-            continue;
-        }
-        if (new_word != 0 && label[i] >= 'a' && label[i] <= 'z') {
-            label[i] = (char)(label[i] - ('a' - 'A'));
-        } else if (new_word == 0 && label[i] >= 'A' && label[i] <= 'Z') {
-            label[i] = (char)(label[i] + ('a' - 'A'));
-        }
-        new_word = 0;
-    }
-}
-
-int gem_os_volume_iter_open(gem_os_volume_iter_t *iter)
-{
-    FILE *fp;
-
-    if (iter == NULL) {
-        errno = EINVAL;
-        return 0;
-    }
-
-    fp = setmntent("/proc/mounts", "r");
-    if (fp == NULL) {
-        return 0;
-    }
-
-    iter->handle = fp;
-    return 1;
-}
-
-int gem_os_volume_iter_read(gem_os_volume_iter_t *iter, gem_os_volume_t *volume)
-{
-    FILE *fp;
-    struct mntent *mnt;
-    const char *base;
-
-    if (iter == NULL || volume == NULL || iter->handle == NULL) {
-        errno = EINVAL;
-        return 0;
-    }
-
-    fp = (FILE *)iter->handle;
-    for (;;) {
-        mnt = getmntent(fp);
-        if (mnt == NULL) {
-            return 0;
-        }
-        if (!gem_os_should_expose_mount(mnt)) {
-            continue;
-        }
-
-        strncpy(volume->mount_path, mnt->mnt_dir,
-                sizeof(volume->mount_path) - 1u);
-        volume->mount_path[sizeof(volume->mount_path) - 1u] = '\0';
-
-        if (strcmp(mnt->mnt_dir, "/") == 0) {
-            strncpy(volume->label, "Root", sizeof(volume->label) - 1u);
-            volume->label[sizeof(volume->label) - 1u] = '\0';
-        } else {
-            base = strrchr(mnt->mnt_dir, '/');
-            if (base != NULL && base[1] != '\0') {
-                ++base;
-            } else {
-                base = mnt->mnt_dir;
-            }
-            strncpy(volume->label, base, sizeof(volume->label) - 1u);
-            volume->label[sizeof(volume->label) - 1u] = '\0';
-            gem_os_capitalize_label(volume->label, sizeof(volume->label));
-        }
-        return 1;
-    }
-}
-
-void gem_os_volume_iter_close(gem_os_volume_iter_t *iter)
-{
-    if (iter == NULL || iter->handle == NULL) {
-        return;
-    }
-
-    (void)endmntent((FILE *)iter->handle);
-    iter->handle = NULL;
-}
-
-static int gem_os_pty_apply_size(int fd, uint16_t columns, uint16_t rows)
-{
-    struct winsize ws;
-
-    if (fd < 0) {
-        errno = EINVAL;
-        return 0;
-    }
-
-    memset(&ws, 0, sizeof(ws));
-    ws.ws_col = (unsigned short)((columns > 0u) ? columns : 80u);
-    ws.ws_row = (unsigned short)((rows > 0u) ? rows : 25u);
-    return (ioctl(fd, TIOCSWINSZ, &ws) == 0) ? 1 : 0;
-}
-
-int gem_os_pty_spawn_shell(gem_os_pty_t *pty, const char *shell_path,
-                           const char *cwd, uint16_t columns, uint16_t rows)
-{
-    int master_fd;
-    int slave_fd = -1;
-    char *slave_name;
-    pid_t pid;
-    const char *shell;
-
-    if (pty == NULL) {
-        errno = EINVAL;
-        return 0;
-    }
-
-    pty->master_fd = -1;
-    pty->child_pid = -1;
-    master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (master_fd < 0) {
-        return 0;
-    }
-    if (grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
-        (void)close(master_fd);
-        return 0;
-    }
-
-    slave_name = ptsname(master_fd);
-    if (slave_name == NULL) {
-        (void)close(master_fd);
-        return 0;
-    }
-
-    pid = fork();
-    if (pid < 0) {
-        (void)close(master_fd);
-        return 0;
-    }
-
-    if (pid == 0) {
-        shell = shell_path;
-        if (shell == NULL || shell[0] == '\0') {
-            shell = getenv("SHELL");
-        }
-        /*
-         * Prefer bash when nothing is requested: Gemix ships bash as
-         * the interactive shell, and a bare /bin/sh (dash/busybox)
-         * is a poor default for the GEM terminal.
-         */
-        if (shell == NULL || shell[0] == '\0') {
-            if (access("/bin/bash", X_OK) == 0) {
-                shell = "/bin/bash";
-            } else {
-                shell = "/bin/sh";
-            }
-        }
-
-        (void)signal(SIGINT, SIG_DFL);
-        (void)signal(SIGTERM, SIG_DFL);
-        (void)signal(SIGHUP, SIG_DFL);
-        (void)signal(SIGCHLD, SIG_DFL);
-
-        (void)close(master_fd);
-        if (setsid() < 0) {
-            _exit(127);
-        }
-
-        slave_fd = open(slave_name, O_RDWR);
-        if (slave_fd < 0) {
-            _exit(127);
-        }
-        (void)gem_os_pty_apply_size(slave_fd, columns, rows);
-        (void)ioctl(slave_fd, TIOCSCTTY, 0);
-        (void)dup2(slave_fd, STDIN_FILENO);
-        (void)dup2(slave_fd, STDOUT_FILENO);
-        (void)dup2(slave_fd, STDERR_FILENO);
-        if (slave_fd > STDERR_FILENO) {
-            (void)close(slave_fd);
-        }
-
-        if (cwd != NULL && cwd[0] != '\0') {
-            (void)chdir(cwd);
-        }
-        (void)setenv("TERM", "dumb", 1);
-        (void)setenv("LINES", "25", 1);
-        (void)setenv("COLUMNS", "80", 1);
-        execl(shell, shell, "-i", (char *)NULL);
-        _exit(127);
-    }
-
-    pty->master_fd = master_fd;
-    pty->child_pid = (int)pid;
-    (void)gem_os_pty_apply_size(master_fd, columns, rows);
-    return 1;
-}
-
-int gem_os_pty_resize(gem_os_pty_t *pty, uint16_t columns, uint16_t rows)
-{
-    if (pty == NULL || pty->master_fd < 0) {
-        errno = EINVAL;
-        return 0;
-    }
-    return gem_os_pty_apply_size(pty->master_fd, columns, rows);
-}
-
-int32_t gem_os_pty_read(gem_os_pty_t *pty, void *buf, uint32_t size)
-{
-    ssize_t rc;
-
-    if (pty == NULL || pty->master_fd < 0 || (buf == NULL && size != 0u)) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    rc = read(pty->master_fd, buf, (size_t)size);
-    if (rc < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
-        }
-        return -1;
-    }
-    return (int32_t)rc;
-}
-
-int32_t gem_os_pty_write(gem_os_pty_t *pty, const void *buf, uint32_t size)
-{
-    ssize_t rc;
-
-    if (pty == NULL || pty->master_fd < 0 || (buf == NULL && size != 0u)) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    rc = write(pty->master_fd, buf, (size_t)size);
-    if (rc < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return 0;
-        }
-        return -1;
-    }
-    return (int32_t)rc;
-}
-
-int gem_os_pty_is_alive(gem_os_pty_t *pty)
-{
-    pid_t rc;
-    int status;
-
-    if (pty == NULL || pty->child_pid <= 0) {
-        return 0;
-    }
-
-    rc = waitpid((pid_t)pty->child_pid, &status, WNOHANG);
-    if (rc == 0) {
-        return 1;
-    }
-    if (rc == (pid_t)pty->child_pid) {
-        pty->child_pid = -1;
-        return 0;
-    }
-    return 0;
-}
-
-void gem_os_pty_close(gem_os_pty_t *pty)
-{
-    if (pty == NULL) {
-        return;
-    }
-
-    if (pty->child_pid > 0) {
-        (void)kill((pid_t)pty->child_pid, SIGHUP);
-        (void)waitpid((pid_t)pty->child_pid, NULL, 0);
-        pty->child_pid = -1;
-    }
-    if (pty->master_fd >= 0) {
-        (void)close(pty->master_fd);
-        pty->master_fd = -1;
-    }
 }

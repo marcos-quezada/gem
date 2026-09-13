@@ -5,7 +5,11 @@ executables into an emulated 68000 environment and forwards a limited set of
 GEM-visible traps to libgem. It is an experimental runner, not a complete
 Atari ST or TOS implementation.
 
-Its application code is in `samples/src/stout/`. The PRG loader is in
+Its application code is in `samples/src/stout/`: `main.c` owns the emulated
+machine and program lifetime and `traps.c` services the guest's system traps.
+Guest programs use Atari's window field numbers (`WF_WORKXYWH` = 4,
+`WF_CURRXYWH` = 5); the trap layer translates them to the hosted selectors,
+which number the outer frame 4 and the work area 5. The PRG loader is in
 `samples/lib/prg/`, with its interface in `samples/include/prg/`. The Musashi recipe and patch are in `samples/lib/musashi/`; the pinned
 upstream source is fetched into the ignored build tree. See
 [cached Musashi](../guides/SAMPLES.md#cached-musashi-dependency).

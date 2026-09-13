@@ -14,6 +14,17 @@ import subprocess
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
+# Identifiers beginning with an underscore and an uppercase letter are reserved
+# by the C standard; only language keywords and required feature macros may
+# use that form in project code (compiler-defined double-underscore names are
+# accepted by construction).
+RESERVED_ALLOWED = {
+    '_Alignas', '_Alignof', '_Atomic', '_Bool', '_Complex', '_Generic',
+    '_Imaginary', '_Noreturn', '_Static_assert', '_Thread_local',
+    '_GNU_SOURCE', '_POSIX_C_SOURCE', '_DEFAULT_SOURCE', '_XOPEN_SOURCE',
+    '_FILE_OFFSET_BITS', '_LARGEFILE64_SOURCE', '_BSD_SOURCE',
+}
+
 
 def owned_files():
     return sorted(p for d in ('src', 'include', 'lib', 'samples', 'tests', 'tools')
@@ -37,6 +48,10 @@ def standards(files):
                       flags=re.S)
         if re.search(r'\b_(?:aes|vdi|gem)\w*', code):
             errors.append(name + ': reserved private symbol prefix')
+        for match in re.finditer(r'(?<![\w])(_[A-Z]\w*)', code):
+            if match[1] not in RESERVED_ALLOWED:
+                errors.append(name + ': reserved identifier ' + match[1])
+                break
         if 'include' in path.relative_to(ROOT).parts:
             for match in re.finditer(
                 r'(?m)^[A-Za-z_]\w*(?:[ \t*]+\w+)*[ \t*]+([a-zA-Z_]\w*)'

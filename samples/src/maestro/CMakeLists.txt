@@ -1,4 +1,4 @@
-add_executable(maestro maestro.c maestro_ui.c)
+add_executable(maestro maestro.c maestro_ui.c maestro_draw.c)
 
 if(TARGET gem_runtime_maestro_tree)
     add_dependencies(maestro gem_runtime_maestro_tree)
@@ -36,7 +36,7 @@ target_link_options(maestro
 )
 
 # The direct variant remains available for isolated display sessions.
-add_executable(maestro_hosted maestro.c maestro_ui.c)
+add_executable(maestro_hosted maestro.c maestro_ui.c maestro_draw.c)
 target_link_libraries(maestro_hosted PRIVATE aes vdi)
 target_include_directories(maestro_hosted PRIVATE ${SAMPLES_ROOT}/include)
 target_compile_options(maestro_hosted PRIVATE -Wall -Wextra -pedantic

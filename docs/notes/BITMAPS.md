@@ -121,7 +121,9 @@ height = abs(y1 - y0) + 1
 
 The hosted VDI uses packed monochrome surfaces and MFDB operations in
 [src/vdi/raster.c](../../src/vdi/raster.c), with pixel helpers in
-[src/vdi/surface.c](../../src/vdi/surface.c). Platform backends present that
+[src/vdi/surface.c](../../src/vdi/surface.c), line drawing in
+[src/vdi/lines.c](../../src/vdi/lines.c) and rectangle fills in
+[src/vdi/fill.c](../../src/vdi/fill.c). Platform backends present that
 surface through Rasta or Linux framebuffer devices.
 
 Proxy clients copy bitmap metadata and data through connection-owned buffers;

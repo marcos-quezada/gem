@@ -7,6 +7,9 @@ add_library(gem SHARED
     tree_decode.c
     aes_validate.c
     client.c
+    client_draw.c
+    client_wind.c
+    client_menu.c
     client_queries.c
     protocol.c
     client_objc.c

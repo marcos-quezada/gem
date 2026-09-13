@@ -1,15 +1,20 @@
 # GEM for Linux
 
-GEM for Linux provides a classic graphical desktop with windows, menus,
-dialogs, a terminal, calculator and clock. Applications share a display
-server, with either a Rasta viewer or a native Linux framebuffer display.
+GEM for Linux brings the classic GEM graphical environment to modern Linux. It
+provides the GEM Desktop, windows, menus and dialogs together with a file
+manager, terminal and sample applications.
 
-![GEM desktop with file manager, calculator, clock and terminal](docs/images/screenshots/gem_desktop_2026_09_06.png)
+GEM can run in a Rasta viewer on a hosted development machine, or directly on
+a Linux framebuffer with keyboard and mouse input from the Linux text console.
+
+![GEM Desktop running its File Manager and Terminal](docs/images/screenshots/gem_desktop_2026_09_12.png)
+
+See [What's new](CHANGELOG.md) for recent changes.
 
 ## Build
 
 Requires Linux, GCC/G++, GNU Make, CMake 3.20+, Git, Python 3, pkg-config,
-SDL2 development files and ImageMagick. The build downloads and verifies a
+SDL2 development files and ImageMagick. The build downloads and verifies
 pinned Rasta and Musashi source archives into ignored `build/` storage.
 Subsequent builds reuse them; no separate checkouts are needed.
 From the repository root:
@@ -23,7 +28,7 @@ Alternatively, `make container` builds and tests using Docker; the host needs
 Docker and GNU Make instead of the compiler dependencies. The first build
 needs internet access. See the [build guide](docs/guides/HOSTED_DEVELOPMENT.md).
 
-## Run
+## Run with Rasta
 
 Start these commands in three separate terminals, in order. Wait for gemd
 to report that it is listening before starting the desktop:
@@ -31,25 +36,34 @@ to report that it is listening before starting the desktop:
 ```sh
 ./bin/tools/rasta --inverse --port 5000
 ./bin/core/gemd
-./bin/samples/desktop
+./bin/apps/desktop
 ```
 
-Alternatively, press F5 with **GEM — all samples** in VS Code to start the
-desktop and every sample together. See the
+Alternatively, press F5 with **GEM — Desktop and Terminal** in VS Code to
+start those two applications together. See the
 [hosted development guide](docs/guides/HOSTED_DEVELOPMENT.md) for setup and the
 [samples guide](docs/guides/SAMPLES.md) for SDK builds.
 
-## Install
+## Run on a Linux framebuffer
 
-Build the native Linux deployment package:
+For a text-console system with Linux framebuffer and evdev support, build the
+native package:
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGEM_PLATFORM=linux
 cmake --build build --target gemix_package -j"$(nproc)"
 ```
 
-Copy the complete `bin/gemix` directory to your installation location,
-for example `/opt/gemix`. Native operation requires access to Linux
-framebuffer and input devices. Follow the
-[installation and startup guide](docs/guides/GEMIX_LINUX.md) to select devices,
-set resource paths and start the installed desktop.
+Run it from a Linux virtual console. The account needs access to `/dev/fb0` and
+the keyboard and pointer devices under `/dev/input`:
+
+```sh
+export GEM_RESOURCE_DIR="$PWD/bin/gemix/share/gem"
+./bin/gemix/bin/gemd &
+while [ ! -S /tmp/gemd.sock ]; do sleep 0.02; done
+./bin/gemix/bin/desktop
+```
+
+Copy the complete `bin/gemix` directory to install it elsewhere. See the
+[native Linux guide](docs/guides/GEMIX_LINUX.md) for device selection,
+permissions and deployment configuration.

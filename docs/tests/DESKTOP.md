@@ -19,18 +19,30 @@ browser window labels when they change.
 real Rasta and scripted HID events. It checks source bitmap pixels for disk,
 Workspace and Trash icons, double-clicks Workspace, enters a fixture folder,
 returns to its parent and closes the browser. It checks title/content changes
-and restored background pixels. No AI or manual input is required.
+and restored background pixels. In list view it also checks the Name, Date,
+Size and Type header and verifies that file metadata is rendered in the last
+three columns. Rows, header and footer use the system font, and directory labels
+use the compact `/name` form. The header uses
+Gemscape's metric-derived band height, an unhighlighted background and a
+horizontal separator; it remains fixed while vertically centered file rows and
+their dotted separators scroll. A matching bottom status band reports
+file/folder counts and total byte size.
+No AI or manual input is required.
 
 Evidence from `make tests` is recorded in [the latest report](LATEST.md).
 Screenshots and machine-readable results are under
 `build/uat/desktop_direct/` and `build/uat/desktop_proxy/`, including
-`desktop_icons.pbm`, `workspace_open.pbm`, `child_open.pbm`,
-`parent_open.pbm` and `browser_closed.pbm`.
+`desktop_icons.pbm`, `workspace_delayed_repeat.pbm`, `workspace_open.pbm`,
+`child_open.pbm`,
+`list_scrolled.pbm`, `size_sorted.pbm`, `parent_open.pbm` and
+`browser_closed.pbm`.
 
-The fixture contains `uat_child/marker.txt`; the captured child window shows
-that directory and file. These checks cover browsing and closing, not file
-deletion or launching every file type. Restart an existing F5 session to load
-the rebuilt desktop and server.
+The fixture directory contains three text files with distinct names and sizes;
+the captured child window shows their metadata and confirms that clicking Size
+puts the largest first. Header clicks apply the same four sort modes as the
+Arrange menu. These checks cover browsing and closing, not file deletion or
+launching every file type. Restart an existing F5 session to load the rebuilt
+desktop and server.
 
 ## Menu cleanup and Workspace follow-up
 
@@ -42,15 +54,12 @@ sort modes have been removed.
 
 Direct/proxy UAT checks Desk geometry with zero and one browser window,
 Desktop info opening/dismissal and File → Open, in addition to browsing.
-The full F5 session test double-clicks the exposed Workspace label with all
-samples still running, verifies a new browser window and closes it. Terminal
-can cover the icon bitmap while part of the label remains exposed; input
-must go to the desktop only in the exposed region.
-
-The reported Workspace failure has not reproduced in these checks. This
-change does not claim a diagnosed Workspace input repair. The click location,
-gesture and visible response from a failing session are needed to narrow it
-further. Restart F5 after rebuilding to use the current server and desktop.
+The full F5 session test clicks the exposed Workspace label, waits beyond the
+double-click interval, and clicks it again to verify that selection alone does
+not activate an icon. It then performs a real double-click, verifies a new
+browser window and closes it. Terminal can cover the icon bitmap while part of
+the label remains exposed; input must go to the desktop only in the exposed
+region. Restart F5 after rebuilding to use the current server and desktop.
 
 ## Desktop info removing windows
 
@@ -98,3 +107,44 @@ The all-samples alert check also exposed an inverted checker phase after a
 background repaint: the desktop used the opposite pattern ink to AES. Its fill
 now matches AES, so opening and dismissing Desktop info restores identical
 background pixels. The existing assertion remains unchanged.
+
+## Trash backend
+
+The desktop Trash icon now opens a File Manager window bound to `trash://`.
+The backend writes percent-encoded freedesktop `.trashinfo` records, chooses a
+same-filesystem home or `.Trash-$UID` store, falls back to home Trash with an
+OS-layer cross-filesystem move when a volume store is unavailable, generates
+collision names, and supports restore, permanent purge and empty. File Manager Delete and drops on
+the icon or Trash window call the same backend. Permanent actions use
+cancel-default GEM alerts, and navigation below a trashed directory is checked
+against that item's store root.
+
+`test_gem_trash` uses an isolated `XDG_DATA_HOME` and covers file and directory
+moves, metadata enumeration, restore collisions and generated rename, symlink
+purge containment, percent encoding, and emptying. The desktop sources are also
+checked for direct POSIX filesystem and mount calls; those operations live in
+the platform implementation behind `gem_os_*`. `uat_trash_direct` and
+`uat_trash_proxy` cover drag-to-Trash and cancel-default/confirmed destructive
+alerts through real HID input. List rows draw a dotted XOR rectangle and icon
+view draws a dotted XOR upside-down-T union contour from the actual icon and
+measured title rectangles while the Desktop polls the drag position. The UAT captures this
+contour at its source and destination, checks that the Trash title is inverted
+before button-up and remains inverted behind the confirmation, verifies that a
+stationary icon-view double-click opens a folder, and moves both a file and a
+non-empty directory. The directory-first sequence
+also protects browser refreshes from corrupting the current absolute path. The
+unit test verifies `.Trash-$UID` placement and moves a nested `tools/` fixture
+across `/tmp` and `/dev/shm`. UAT also forces a move failure, dismisses the
+error alert and immediately double-clicks another folder; this verifies that
+the alert consumes its button release and later folder activation still works.
+Because classic AES has no filesystem-change broadcast, the Desktop dispatches
+successful move and restore notifications to all of its File Manager windows.
+Every filesystem window showing the affected parent and every Trash window is
+reloaded immediately. Empty Trash follows the cached Trash contents rather than
+the active-window backend, so it remains enabled after a source-window drag
+changes focus away from an open Trash browser.
+
+Popup menu layout measures rendered labels and shortcuts, strips conventional
+leading checkmark blanks from the visible label, and gives the content equal
+left and right padding plus a distinct checkmark gutter. Menu UAT and the Trash
+Arrange-menu capture exercise this geometry in direct and proxied modes.

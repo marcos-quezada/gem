@@ -7,6 +7,8 @@
  * Copyright (C) 2026 tomaz stih
  */
 #include "gem_protocol.h"
+
+#include "platform/os.h"
 #include "gem/gemd.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -57,7 +59,7 @@ WORD gem_client_tree(OBJECT *tree, uint16_t operation, WORD args[12])
     callback_tree = tree;
     int packed = gem_tree_pack(packet, tree);
     callback_count = packet->count;
-    if (!packed && getenv("GEM_TRACE_RPC"))
+    if (!packed && gem_os_getenv_ref("GEM_TRACE_RPC") != NULL)
         fprintf(stderr, "AES tree packing failed: operation=%u count=%u\n",
                 operation, packet->count);
     if (!packed ||

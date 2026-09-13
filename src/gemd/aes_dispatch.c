@@ -97,6 +97,10 @@ WORD gem_aes_dispatch(gem_aes_packet_t *p)
         }
         case rpc_shel_get: {
             void *arg0 = p->data + (0);
+            WORD available = shel_get(NULL, SHEL_BUFSIZE);
+            if (p->args[1] == SHEL_BUFSIZE)
+                return available;
+            p->args[0] = p->args[1] < available ? p->args[1] : available;
             return shel_get(arg0, p->args[1]);
         }
         case rpc_shel_put: {

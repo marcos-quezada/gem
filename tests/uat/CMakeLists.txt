@@ -4,7 +4,11 @@ foreach(number RANGE 1 33)
     foreach(mode direct proxy)
         set(target demo${number}_${mode})
         if(number EQUAL 19)
-            add_executable(${target} ${PROJECT_SOURCE_DIR}/samples/src/terminal/main.c)
+            add_executable(${target}
+                ${PROJECT_SOURCE_DIR}/src/apps/terminal/main.c
+                ${PROJECT_SOURCE_DIR}/src/apps/terminal/screen.c
+                ${PROJECT_SOURCE_DIR}/src/apps/terminal/draw.c
+                ${PROJECT_SOURCE_DIR}/src/apps/terminal/vt100.c)
         else()
             add_executable(${target} demo${number}/main.c)
         endif()
@@ -35,6 +39,23 @@ foreach(number RANGE 1 33)
             BUILD_WITH_INSTALL_RPATH FALSE
             BUILD_RPATH "${GEM_LIBRARY_DIR}")
     endforeach()
+endforeach()
+
+# Trash drop, cancel-default confirmation and confirmed emptying.
+foreach(mode direct proxy)
+    if(mode STREQUAL "direct")
+        set(trash_desktop_target desktop_hosted)
+    else()
+        set(trash_desktop_target desktop)
+    endif()
+    add_test(NAME uat_trash_${mode}
+        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/samples/trash.py
+            --mode ${mode} --binary $<TARGET_FILE:${trash_desktop_target}>
+            --gemd $<TARGET_FILE:gemd> --artifacts ${CMAKE_BINARY_DIR}/uat
+            --resources ${GEM_RESOURCES_DIR})
+    set_tests_properties(uat_trash_${mode} PROPERTIES
+        ENVIRONMENT "RASTA_BIN=${GEM_TOOLS_DIR}/rasta"
+        LABELS "uat;${mode}" TIMEOUT 30)
 endforeach()
 add_executable(demo27_rscgen demo27/make_rsc.c)
 target_include_directories(demo27_rscgen PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests/include)

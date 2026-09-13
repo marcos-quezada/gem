@@ -16,7 +16,7 @@ Full runs publish per-test results and proposed actions in
 - `tests/unit`: header, renderer, and malformed protocol checks.
 - `tests/integration`: real-server RPC, ownership/security, VDI and AES tests.
 - `tests/uat/demo1`–`demo33`: numbered acceptance scenarios and applications.
-  Demo19 uses `samples/src/terminal/main.c` instead of a duplicate source.
+  Demo19 builds the Terminal application's sources instead of a duplicate.
 - `tests/include`: headers used only by acceptance fixtures and helpers.
 - `tests/uat/manual`: shared drawing implementation for demos 3–16.
 - `tests/uat/samples`: acceptance scripts for independent sample applications.
@@ -27,15 +27,18 @@ Full runs publish per-test results and proposed actions in
 
 Demos 17, 18 and 19 replace the names `multi`, `menu_demo` and `terminal`.
 Existing numbered demos retain their numbers. `terminal` is also built as a
-normal desktop application from `samples/src/terminal/main.c`; demo19 uses
-that same source. UAT-only helper headers live in `tests/include/`.
+normal bundled application from `src/apps/terminal/`; demo19 builds those same
+sources. UAT-only helper headers live in `tests/include/`.
 
 The independent applications in `samples/src/` are separate from these numbered
 demos. Their complete interactive behavior is not implied by a passing UAT run.
 
 Every UAT launches an actual Rasta viewer, relays its subscription and input
 protocol, and starts a demo. Proxy tests also start their own `gemd`. No test
-kills an existing desktop or viewer. SDL dummy video is the default, so a
+kills an existing desktop or viewer. The viewer must accept GEM's subscription
+datagram: a rejected reconfiguration fails the test, because a manually started
+viewer relies on it for its geometry and framebuffer path. A viewer that loses
+the ephemeral-port race against a parallel session is restarted on a new port. SDL dummy video is the default, so a
 window server is unnecessary. `RASTA_BIN` selects Rasta; `UAT_SDL_DRIVER`
 selects a visible SDL backend when desired. The tests use a 640×400 mono surface.
 UAT enables AddressSanitizer and UndefinedBehaviorSanitizer with immediate
@@ -48,6 +51,11 @@ the reviewed checkpoint, and require normal application exit. The terminals
 instead execute `echo uat123 > output` through real HID input and verify the
 result in their own working directory, then display it with `cat` and exit the
 shell. Their output and blinking cursor are not treated as a static image.
+Demo19 also verifies through that PTY that the child shell receives
+`TERM=vt100` without inherited VTE/color-terminal capability variables. A
+focused unit test feeds cursor, editing, SGR, DEC-graphics, UTF-8 box drawing,
+control strings and alternate-screen sequences directly into the Terminal
+parser.
 
 ## Catalog
 
@@ -117,14 +125,46 @@ The demos now state their intended tree structure and drawing colors explicitly.
 with Rasta. They compare visible disk, Workspace and Trash pixels to the
 source bitmap assets, double-click Workspace, enter `uat_child`, return to
 the parent and close the browser. Title and content changes establish
-navigation, and the exposed background must be restored after closing.
-Fixtures and captured PBMs live under `build/uat/desktop_<mode>/`. These
-checks use deterministic HID input and require no AI or manual clicking.
+navigation. The list-view checks require a header and visible Date, Size and
+Type metadata beside each name. They also require no initial row selection and
+a normal-background, system-font header aligned with the scrollbar arrow. The
+header and file-count status stay fixed while centered, dotted-separated rows
+scroll; the exposed background must be restored after closing. Fixtures and
+captured PBMs live under `build/uat/desktop_<mode>/`. These checks use
+deterministic HID input and require no AI or manual clicking.
 
 Desktop checks also open/dismiss Desktop info, assert that Desk has no blank
 rows with zero or one browser windows, and reopen Workspace with File → Open.
-The F5 integration test clicks the exposed Workspace label with all samples
-running and checks the new window and its close through independent RPC.
+The F5 integration test clicks the exposed Workspace label with all
+applications running and checks the new window and its close through
+independent RPC.
+
+`uat_trash_direct` and `uat_trash_proxy` open the Trash icon as a `trash://`
+File Manager, drop a non-empty folder and a file on the Trash icon, verify that
+Cancel is the default, confirm the moves, then cancel and confirm Empty Trash.
+Source and destination frames verify the icon view's dotted XOR upside-down-T
+union contour around the icon and measured title rectangles. A stationary
+double-click first opens that folder to guard click/drag disambiguation. The
+destination frame is captured while the button remains held and verifies that
+Desktop hit-testing has already inverted the Trash title; the release-point
+frame verifies that the title remains inverted behind the confirmation alert.
+The list-row rectangle drag checks the same held-button Trash inversion.
+The move and Restore path also keeps the original Workspace browser open and
+verifies that its rows disappear and reappear through Desktop's internal
+directory-change notification.
+The
+isolated `test_gem_trash` backend test covers File → Delete's shared move
+operation, directory browsing containment, restore and rename-on-collision,
+permanent purge, symlink safety, `.Trash-$UID` placement and a cross-filesystem
+move of nested `tools/scripts/tool.sh` through the OS abstraction. Both Trash
+UAT modes force a move failure, dismiss the resulting alert and immediately
+double-click another folder to verify that modal button-up state cannot disable
+later activation.
+
+The Trash scenario also captures the Arrange popup. Popup menu content is
+measured with equal left and right padding plus a distinct checkmark gutter
+after conventional leading checkmark blanks are removed from the visible item
+label. Menu demos exercise the same layout in direct and proxied modes.
 
 Desktop info is additionally exercised in the F5 integration session with a
 three-second menu wait, a pending split RPC request and a seven-second alert

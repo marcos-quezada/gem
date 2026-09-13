@@ -1,7 +1,8 @@
 # Hosted GEM security and safety
 
 Original security review: 2026-09-05; protocol and documentation inventory
-updated on 2026-09-06. This describes implemented checks, not a claim that
+updated on 2026-09-06; VDI/transport code review on 2026-09-11; shell process
+review on 2026-09-12. This describes implemented checks, not a claim that
 GEM is a security sandbox. Public AES/VDI headers, signatures, constants and
 object layouts are unchanged. The private libgem/gemd protocol remains a
 same-host ABI protocol; it is not suitable for exposure as a network service.
@@ -58,7 +59,7 @@ Current hosted service limits are:
 | --- | --- |
 | Connections | 16 |
 | Request/reply payload | 65536 bytes |
-| Extended scalar array data | 2048 WORDs per request |
+| Extended scalar array data | 16384 WORDs per request |
 | Copied AES tree | 128 objects; 48 KiB data arena |
 | Bitmap buffer | 8 MiB per bitmap; 4096-byte transfer chunks |
 | Incomplete frame or pending output | 2 seconds absolute |
@@ -68,6 +69,8 @@ Current hosted service limits are:
 | Outstanding update lock | 5 seconds absolute |
 | Normal server-side event poll | Nonblocking; libgem waits in the client |
 | Menu objects / copied strings | 64 / 32 |
+| Concurrent AES launch records | 32 |
+| AES-global shell buffer | 32767 bytes |
 
 Expired clients are disconnected and their owned resources/locks released.
 The libgem event wrapper preserves the application's requested logical timer
@@ -102,6 +105,33 @@ disconnects. A second standard panel waits rather than recursively opening.
 These panels are not independent per-application input-modal windows: the
 classic shared desktop still has one interactive standard panel at a time.
 
+`shel_write` executes as the gemd user and is not a privilege boundary. It
+does not invoke a command shell: the platform backend resolves an executable,
+derives `argv` from the bounded 127-byte TOS tail, constructs a child-only
+environment and calls `execve`. Existing shell metadata variables are replaced
+in that environment and are never installed in the parent. AES reserves the
+application id before the fork and associates command/tail state with that id
+and PID, avoiding a global last-command race. Failed execs are synchronously
+reaped; completed children are reaped through the OS wrapper and release their
+bounded launch slot. Deployments should treat `GEMIX_HOME`, `PATH` and
+`GEM_AES_PATH` as trusted executable search paths.
+
+The desktop Trash is a virtual `trash://` browser rather than a normal browser
+opened on `Trash/files`. Trash rules build freedesktop metadata, but all
+environment, mount, directory, metadata, move and deletion operations pass
+through `gem_os_*`. Same-filesystem moves use `rename`; cross-filesystem moves
+first stage the source under a hidden sibling name, copy regular files,
+directories and symbolic links without following links, and expose the
+destination only after the original name is gone. Unsupported special files
+are refused. A failed copy restores the original name and removes its partial
+destination; after a complete copy, cleanup never removes the destination even
+if a hidden staging remnant cannot be deleted. Directory navigation is resolved against the owning
+store's `files/` root. Recursive deletion opens each component relative to an
+already validated directory descriptor with no-follow semantics and refuses
+the store root, preventing a symlink payload from redirecting deletion outside
+Trash. Restores never overwrite an existing entry; the UI can skip, cancel or
+select a generated collision name.
+
 ## Resource parsing
 
 Font paths use checked formatting rather than an unbounded stack copy.
@@ -129,7 +159,8 @@ Current outcomes are in the [generated report](../tests/LATEST.md). Core
 security-related checks include:
 
 - `test_vdi`: existing reference drawing/state tests, normal fonts,
-  overlong paths, truncated and malformed font metadata and glyph offsets.
+  overlong paths, truncated and malformed font metadata and glyph offsets,
+  WORD-limit copy corners and text positions, screen scroll overlap and edges.
 - `test_gem_header`: public header compatibility.
 - `test_gem_rpc`: existing fragmented/malformed traffic, normal proxy output
   buffers, scrap/menu lifecycle, HID modifiers and redraw/button state;
@@ -137,11 +168,19 @@ security-related checks include:
 - `test_gemd_security`: three simultaneous independent clients; stalled
   readers/writers, authorization, drawing/clip isolation, focused keyboard
   routing, timer/lock limits, menu lifetime, dialog acceptance/disconnect,
-  `WF_KIND` output, all four `1011` alert edges, and 231 deterministic
-  mutations of menu tree links.
+  `WF_KIND` output, all four `1011` alert edges, 231 deterministic
+  mutations of menu tree links, admission after an exclusive session exits,
+  an empty menu strip for raised windows of menu-less applications, and
+  `WM_REDRAW` delivery to an application uncovered by a window whose owner
+  exits immediately.
 - `test_gemd_host`: symlink/hardlink/FIFO rejection without changing the
   target file, normal framebuffer publication/replacement, ID rollover, and
   standard/hostile wildcard patterns.
+- `test_aes_shell`: shell-start command synthesis, environment and path lookup,
+  a 4096-byte size query, and concurrent global-buffer writes without tearing.
+- `test_aes_rpc`: parallel Clock/Terminal launches with distinct application
+  ids and tails, missing-executable failure, and no shell metadata leakage into
+  the parent environment.
 
 The RPC runner also verifies refusal of regular-file, symlink and live-socket
 collisions, preservation of those paths, and normal socket removal on exit.
@@ -211,3 +250,9 @@ these bounded adversarial cases do not prove the absence of vulnerabilities.
 Dirty-rectangle bounds use widened arithmetic on both backends. If Rasta
 replaces or truncates its framebuffer, the next partial present restores the
 complete shadow frame before publishing damage, preserving untouched pixels.
+
+Raster copy widths and glyph clipping edges are also widened: corners at the
+WORD limits can no longer produce a zero-width division or a text run that
+escapes the row buffer, both of which `BITMAP_COPY` and `V_GTEXT` could reach.
+An exclusive VDI-only session releases its admission claim when its connection
+closes. The [audit](../tests/SECURITY_AUDIT.md) lists the regressions.

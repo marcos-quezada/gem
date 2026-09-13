@@ -65,6 +65,17 @@ def check(session, initial):
     n=session.args.demo
     if n in (19,31):
         # Prove HID -> AES -> PTY -> real shell, with an independently read result.
+        if n == 19:
+            term_path=session.path/'environ'
+            term_path.unlink(missing_ok=True)
+            type_text(session,'env > environ\n')
+            deadline=time.monotonic()+5
+            while not term_path.exists() and time.monotonic()<deadline: session.pause(.05)
+            environment=term_path.read_text().splitlines()
+            assert 'TERM=vt100' in environment, 'Terminal did not advertise VT100'
+            leaked=('COLORTERM=', 'TERM_PROGRAM=', 'VTE_VERSION=')
+            assert not any(item.startswith(leaked) for item in environment), \
+                'Terminal leaked host capability variables'
         path=session.path/'output'
         path.unlink(missing_ok=True)
         type_text(session,'echo uat123 > output\n')
@@ -89,7 +100,7 @@ def check(session, initial):
         changed(session,'moved',initial)
         session.click(83,56); exited(session)
     elif n==18:
-        session.event(3,35,10)
+        session.event(3,58,10)
         menu=changed(session,'menu_open',initial)
         session.key(41)
         if session.args.mode == 'proxy':
@@ -108,8 +119,8 @@ def check(session, initial):
             deadline=time.monotonic()+5
             while second.poll() is None and time.monotonic()<deadline: session.pause(.05)
             assert second.poll()==0 and session.demo.poll() is None, 'Closing B affected A'
-        session.event(3,35,10)
-        session.click(35,32); exited(session)
+        session.event(3,45,10); session.event(10,45,10)
+        session.event(3,50,28); session.event(11,50,28); exited(session)
     elif n==20:
         session.click(230,160)
         changed(session,'second_closed',initial)
@@ -121,7 +132,7 @@ def check(session, initial):
         changed(session,'radio',toggled)
         session.click(130,100); exited(session)
     elif n in (22,23):
-        session.event(3,25,10)
+        session.event(3,48,10)
         opened=changed(session,'menu_open',initial)
         session.key(41)
         session.click(30,30); exited(session)
@@ -138,7 +149,7 @@ def check(session, initial):
         changed(session,'cleared',edited)
         session.key(41); exited(session)
     elif n==26:
-        session.event(3,75,10)
+        session.event(3,98,10)
         changed(session,'windows_menu',initial)
         session.key(41)
         session.click(100,80)

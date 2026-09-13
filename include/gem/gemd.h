@@ -17,7 +17,7 @@
 #include <stdint.h>
 
 /* BEGIN GENERATED AES RPC */
-enum { GEM_AES_WORDS = 2048, GEM_AES_ARGS = 12 };
+enum { GEM_AES_WORDS = 16384, GEM_AES_ARGS = 12 };
 typedef struct gem_aes_packet {
     WORD handle;
     uint16_t function;

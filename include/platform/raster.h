@@ -63,6 +63,12 @@ gem_raster_surface_t *gem_raster_surface(void);
 void gem_raster_present(void);
 
 /*
+ * Blanks the drawing surface and the published output. Used on shutdown so
+ * the viewer shows a cleared screen instead of the last rendered frame.
+ */
+void gem_raster_clear(void);
+
+/*
  * Presents only the rectangle (x, y, width, height) in surface coordinates.
  * Used for cheap mouse-cursor updates; out-of-range edges are clamped.
  */

@@ -1,5 +1,6 @@
 add_executable(stout
     main.c
+    traps.c
 )
 
 set_target_properties(stout PROPERTIES

@@ -85,25 +85,72 @@ static void vdi_store_pixel_raw(MFDB *dst, WORD x, WORD y, WORD color)
     }
 }
 
+/*
+ * Copy an unscaled, unclipped-source screen rectangle onto the screen one
+ * row at a time. Rows are visited away from the overlap so a scroll never
+ * reads a row it already overwrote, and the partial bytes at both edges are
+ * merged through masks so only the destination rectangle changes.
+ */
+static void vdi_blit_screen_rows(const vdi_rect_t *dst_rect, LONG dx, LONG dy)
+{
+    uint8_t *pixels = (uint8_t *)vdi_state.surface->pixels;
+    size_t pitch = vdi_state.surface->pitch;
+    size_t left_byte = (size_t)dst_rect->x0 / 8u;
+    size_t right_byte = (size_t)dst_rect->x1 / 8u;
+    uint8_t left_mask = (uint8_t)(0xffu >> ((unsigned int)dst_rect->x0 & 7u));
+    uint8_t right_mask =
+        (uint8_t)(0xffu << (7u - ((unsigned int)dst_rect->x1 & 7u)));
+    LONG rows = (LONG)dst_rect->y1 - dst_rect->y0 + 1;
+    LONG step = dy > 0 ? -1 : 1;
+    LONG row = dy > 0 ? rows - 1 : 0;
+
+    for (; row >= 0 && row < rows; row += step) {
+        size_t y = (size_t)(dst_rect->y0 + row);
+        size_t last = right_byte - left_byte;
+        uint8_t *dr = pixels + y * pitch + left_byte;
+        const uint8_t *sr = pixels + (y - (size_t)dy) * pitch +
+                            (size_t)((LONG)left_byte - dx / 8);
+        /* Both edge bytes are read before the interior move: a shift
+         * within one row overlaps them with bytes the move rewrites. */
+        uint8_t first = sr[0];
+        uint8_t final = sr[last];
+
+        if (last == 0u) {
+            uint8_t mask = (uint8_t)(left_mask & right_mask);
+
+            dr[0] = (uint8_t)((dr[0] & (uint8_t)~mask) | (first & mask));
+            continue;
+        }
+        if (last > 1u) {
+            memmove(dr + 1, sr + 1, last - 1u);
+        }
+        dr[0] = (uint8_t)((dr[0] & (uint8_t)~left_mask) | (first & left_mask));
+        dr[last] =
+            (uint8_t)((dr[last] & (uint8_t)~right_mask) | (final & right_mask));
+    }
+}
+
 static void vdi_blit_bitmap(MFDB *src, MFDB *dst, CONST WORD pxy[8], WORD mode,
                             WORD transparent, WORD foreground)
 {
     vdi_rect_t dst_rect;
     vdi_rect_t dst_bounds;
-    WORD src_x0 = vdi_min_word(pxy[0], pxy[2]);
-    WORD src_y0 = vdi_min_word(pxy[1], pxy[3]);
-    WORD src_w = (WORD)(abs(pxy[2] - pxy[0]) + 1);
-    WORD src_h = (WORD)(abs(pxy[3] - pxy[1]) + 1);
-    WORD dst_x0 = vdi_min_word(pxy[4], pxy[6]);
-    WORD dst_y0 = vdi_min_word(pxy[5], pxy[7]);
-    WORD dst_w = (WORD)(abs(pxy[6] - pxy[4]) + 1);
-    WORD dst_h = (WORD)(abs(pxy[7] - pxy[5]) + 1);
+    /* Inclusive corner arithmetic must not wrap: two WORD corners can be
+     * up to 65535 apart, so widths, heights and offsets stay in LONG. */
+    LONG src_x0 = vdi_min_word(pxy[0], pxy[2]);
+    LONG src_y0 = vdi_min_word(pxy[1], pxy[3]);
+    LONG src_w = (LONG)abs(pxy[2] - pxy[0]) + 1;
+    LONG src_h = (LONG)abs(pxy[3] - pxy[1]) + 1;
+    LONG dst_x0 = vdi_min_word(pxy[4], pxy[6]);
+    LONG dst_y0 = vdi_min_word(pxy[5], pxy[7]);
+    LONG dst_w = (LONG)abs(pxy[6] - pxy[4]) + 1;
+    LONG dst_h = (LONG)abs(pxy[7] - pxy[5]) + 1;
     WORD y;
 
-    dst_rect.x0 = dst_x0;
-    dst_rect.y0 = dst_y0;
-    dst_rect.x1 = (WORD)(dst_x0 + dst_w - 1);
-    dst_rect.y1 = (WORD)(dst_y0 + dst_h - 1);
+    dst_rect.x0 = (WORD)dst_x0;
+    dst_rect.y0 = (WORD)dst_y0;
+    dst_rect.x1 = vdi_max_word(pxy[4], pxy[6]);
+    dst_rect.y1 = vdi_max_word(pxy[5], pxy[7]);
     vdi_get_destination_bounds(dst, &dst_bounds);
     if (!vdi_intersect_rects(&dst_rect, &dst_bounds, &dst_rect)) {
         return;
@@ -115,37 +162,30 @@ static void vdi_blit_bitmap(MFDB *src, MFDB *dst, CONST WORD pxy[8], WORD mode,
         vdi_mark_dirty(dst_rect.x0, dst_rect.y0, dst_rect.x1, dst_rect.y1);
 
     if (src_w == dst_w && src_h == dst_h && transparent == 0 && mode == 1 &&
-        mode != 6 && vdi_uses_screen(src) && vdi_uses_screen(dst) &&
-        ((unsigned int)src_x0 & 7u) == ((unsigned int)dst_x0 & 7u)) {
-        size_t pitch = vdi_state.surface->pitch;
-        size_t left_byte = (size_t)dst_rect.x0 / 8u;
-        size_t right_byte = (size_t)dst_rect.x1 / 8u;
-        size_t row_bytes = right_byte - left_byte + 1u;
-        WORD rel_y;
+        vdi_uses_screen(src) && vdi_uses_screen(dst) &&
+        ((src_x0 - dst_x0) & 7) == 0) {
+        /* The source rows that feed the clipped destination must all be
+         * on screen; anything else takes the sampling path below. */
+        LONG dx = dst_x0 - src_x0;
+        LONG dy = dst_y0 - src_y0;
 
-        for (rel_y = 0; rel_y <= dst_rect.y1 - dst_rect.y0; ++rel_y) {
-            WORD sy = (WORD)(src_y0 + (dst_rect.y0 - dst_y0) + rel_y);
-            WORD dy = (WORD)(dst_rect.y0 + rel_y);
-            const uint8_t *sr = (const uint8_t *)vdi_state.surface->pixels +
-                                (size_t)sy * pitch + left_byte;
-            uint8_t *dr = (uint8_t *)vdi_state.surface->pixels +
-                          (size_t)dy * pitch + left_byte;
-
-            memmove(dr, sr, row_bytes);
+        if (dst_rect.x0 - dx >= 0 && dst_rect.x1 - dx < vdi_state.width &&
+            dst_rect.y0 - dy >= 0 && dst_rect.y1 - dy < vdi_state.height) {
+            vdi_blit_screen_rows(&dst_rect, dx, dy);
+            vdi_present_screen();
+            return;
         }
-        vdi_present_screen();
-        return;
     }
 
     for (y = dst_rect.y0; y <= dst_rect.y1; ++y) {
-        WORD rel_y = (WORD)(y - dst_y0);
-        WORD sample_y = (WORD)(src_y0 + ((LONG)rel_y * src_h) / dst_h);
+        LONG rel_y = (LONG)y - dst_y0;
+        WORD sample_y = (WORD)(src_y0 + (rel_y * src_h) / dst_h);
         WORD x = dst_rect.x0;
 
         if (mode == 6) {
             for (; x <= dst_rect.x1; ++x) {
-                WORD rel_x = (WORD)(x - dst_x0);
-                WORD sample_x = (WORD)(src_x0 + ((LONG)rel_x * src_w) / dst_w);
+                LONG rel_x = (LONG)x - dst_x0;
+                WORD sample_x = (WORD)(src_x0 + (rel_x * src_w) / dst_w);
 
                 if (vdi_sample_bitmap_direct(src, sample_x, sample_y) != 0u) {
                     WORD dest = vdi_mfdb_get_pixel(dst, x, y);
@@ -157,8 +197,8 @@ static void vdi_blit_bitmap(MFDB *src, MFDB *dst, CONST WORD pxy[8], WORD mode,
         }
 
         while (x <= dst_rect.x1) {
-            WORD rel_x = (WORD)(x - dst_x0);
-            WORD sample_x = (WORD)(src_x0 + ((LONG)rel_x * src_w) / dst_w);
+            LONG rel_x = (LONG)x - dst_x0;
+            WORD sample_x = (WORD)(src_x0 + (rel_x * src_w) / dst_w);
             uint8_t source = vdi_sample_bitmap_direct(src, sample_x, sample_y);
             WORD run_color;
             WORD run_start;
@@ -173,8 +213,8 @@ static void vdi_blit_bitmap(MFDB *src, MFDB *dst, CONST WORD pxy[8], WORD mode,
             run_start = x;
             ++x;
             while (x <= dst_rect.x1) {
-                rel_x = (WORD)(x - dst_x0);
-                sample_x = (WORD)(src_x0 + ((LONG)rel_x * src_w) / dst_w);
+                rel_x = (LONG)x - dst_x0;
+                sample_x = (WORD)(src_x0 + (rel_x * src_w) / dst_w);
                 source = vdi_sample_bitmap_direct(src, sample_x, sample_y);
                 if (transparent != 0) {
                     if (source == 0u) {

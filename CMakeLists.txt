@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(gem C)
 
 include(CTest)
+find_package(Threads REQUIRED)
 
 set(GEM_PLATFORM "rasta" CACHE STRING
     "Display/input backend used by VDI (rasta or linux)")
@@ -25,6 +26,7 @@ set(GEM_OUTPUT_ROOT ${PROJECT_SOURCE_DIR}/bin CACHE PATH
     "Runtime output root (use a separate tree for backend diagnostics)")
 set(GEM_CORE_DIR ${GEM_OUTPUT_ROOT}/core)
 set(GEM_LIBRARY_DIR ${GEM_OUTPUT_ROOT}/lib)
+set(GEM_APPS_DIR ${GEM_OUTPUT_ROOT}/apps)
 set(GEM_SAMPLES_DIR ${GEM_OUTPUT_ROOT}/samples)
 set(GEM_DEMOS_DIR ${GEM_OUTPUT_ROOT}/demos)
 set(GEM_RESOURCES_DIR ${GEM_OUTPUT_ROOT}/resources)
@@ -33,6 +35,7 @@ set(GEM_TOOLS_DIR ${GEM_OUTPUT_ROOT}/tools)
 file(MAKE_DIRECTORY
     ${GEM_CORE_DIR}
     ${GEM_LIBRARY_DIR}
+    ${GEM_APPS_DIR}
     ${GEM_SAMPLES_DIR}
     ${GEM_DEMOS_DIR}
     ${GEM_RESOURCES_DIR}
@@ -78,6 +81,7 @@ if(EXISTS ${PROJECT_SOURCE_DIR}/src/rcs/CMakeLists.txt)
     add_subdirectory(src/rcs)
 endif()
 add_subdirectory(samples)
+add_subdirectory(src/apps)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

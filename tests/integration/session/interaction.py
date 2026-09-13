@@ -139,7 +139,7 @@ class Interaction:
 
     def workspace(self):
         assets = (Path(__file__).resolve().parents[3] /
-                  'samples/src/desktop/desktop_assets.c').read_text()
+                  'src/apps/desktop/desktop_assets.c').read_text()
         def words(name):
             body = assets.split('static const UWORD ' + name + '[] = {')[1]
             return [int(v, 16) for v in re.findall(r'0x[0-9a-f]+', body.split('};')[0])]
@@ -160,6 +160,15 @@ class Interaction:
         x, y = positions[0]
         assert self.rpc(36, struct.pack('=hh', x, y))[0] == 0
         previous = self.rpc(36, struct.pack('=hh', 300, 50))[0]
+        for kind in (3, 10, 11):
+            self.event(kind, x, y)
+        self.session.pause(.85)
+        for kind in (3, 10, 11):
+            self.event(kind, x, y)
+        self.session.pause(.3)
+        assert self.rpc(36, struct.pack('=hh', 300, 50))[0] == previous, \
+            'A delayed click on a selected icon acted as a double-click'
+        self.session.pause(.85)
         self.event(3, x, y)
         for _ in range(2):
             self.event(10, x, y)
@@ -167,14 +176,15 @@ class Interaction:
         self.session.pause(.5)
         self.snapshot('workspace_open')
         browser = self.rpc(36, struct.pack('=hh', 300, 50))[0]
-        assert browser > 0 and browser != previous, 'Workspace double-click did not open file manager with all samples running'
+        assert browser > 0 and browser != previous, \
+            'Workspace double-click did not open file manager with all applications running'
         assert self.rect(browser)[:2] == (219, 40)
         for kind in (3, 10, 11):
             self.event(kind, 229, 50)
         self.session.pause(.3)
         assert self.rpc(36, struct.pack('=hh', 300, 50))[0] == previous
         self.session.state['workspace_checks_passed'] = True
-        print('PASS Workspace opens and closes with all samples running', flush=True)
+        print('PASS Workspace opens and closes with all applications running', flush=True)
 
     def desktop_info(self):
         # The Stout closer lies directly underneath the Desk popup's first
@@ -228,7 +238,7 @@ class Interaction:
         assert self.rpc(31, struct.pack('=h', witness))[0] == 1
         assert self.rpc(32, struct.pack('=h', witness))[0] == 1
         self.session.state['desktop_info_checks_passed'] = True
-        print('PASS Desktop info preserves the covered window and all samples', flush=True)
+        print('PASS Desktop info preserves the covered window and all applications', flush=True)
 
     def check(self):
         viewer = next(proc for proc in self.session.processes

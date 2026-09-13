@@ -2,6 +2,8 @@
 
 add_executable(test_vdi
     test_vdi.c
+    test_vdi_raster.c
+    vdi_test_support.c
     vdi_test_host.c
     vdi_reference.c
     vdi_optimized.c
@@ -14,8 +16,12 @@ add_executable(test_vdi
     ${PROJECT_SOURCE_DIR}/src/vdi/text.c
     ${PROJECT_SOURCE_DIR}/src/vdi/vdi_core.c
     ${PROJECT_SOURCE_DIR}/src/vdi/cursor.c
+    ${PROJECT_SOURCE_DIR}/src/vdi/cursor_forms.c
     ${PROJECT_SOURCE_DIR}/src/vdi/fonts.c
+    ${PROJECT_SOURCE_DIR}/src/vdi/glyphs.c
     ${PROJECT_SOURCE_DIR}/src/vdi/surface.c
+    ${PROJECT_SOURCE_DIR}/src/vdi/lines.c
+    ${PROJECT_SOURCE_DIR}/src/vdi/fill.c
 )
 
 add_dependencies(test_vdi gem_runtime_fonts gem_runtime_cursors)

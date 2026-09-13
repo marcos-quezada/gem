@@ -46,16 +46,17 @@ static int vdi_angle_in_sweep(WORD angle, WORD start, WORD end)
 
 static WORD vdi_point_count_from_radius(WORD xrad, WORD yrad)
 {
-    WORD radius = vdi_max_word(xrad, yrad);
-    WORD points = (WORD)(radius * 8);
+    /* Widen before scaling: a WORD product wraps past radius 4095 and
+     * would collapse a large arc to the 32-point minimum. */
+    int points = (int)vdi_max_word(xrad, yrad) * 8;
 
     if (points < 32) {
         points = 32;
     }
-    if (points > (WORD)(VDI_POLYGON_MAX_POINTS - 2)) {
-        points = (WORD)(VDI_POLYGON_MAX_POINTS - 2);
+    if (points > VDI_POLYGON_MAX_POINTS - 2) {
+        points = VDI_POLYGON_MAX_POINTS - 2;
     }
-    return points;
+    return (WORD)points;
 }
 
 void vdi_fill_polygon_points(const WORD *points, WORD count, WORD color)
@@ -396,8 +397,8 @@ VOID v_contourfill(WORD handle, WORD x, WORD y, WORD index)
         size_t pitch = vdi_state.surface->pitch;
         const uint8_t *pixels = (const uint8_t *)vdi_state.surface->pixels;
 
-#define _CF_ROW(yy) (pixels + (size_t)(yy) * pitch)
-#define _CF_PIX(row, xx)                                                       \
+#define VDI_CF_ROW(yy) (pixels + (size_t)(yy) * pitch)
+#define VDI_CF_PIX(row, xx)                                                    \
     (((row)[(size_t)(xx) / 8u] &                                               \
       (uint8_t)(0x80u >> ((unsigned int)(xx) & 7u))) != 0u)
 
@@ -415,19 +416,19 @@ VOID v_contourfill(WORD handle, WORD x, WORD y, WORD index)
                 seed.y > clip.y1) {
                 continue;
             }
-            seed_row = _CF_ROW(seed.y);
-            if ((WORD)_CF_PIX(seed_row, seed.x) != target) {
+            seed_row = VDI_CF_ROW(seed.y);
+            if ((WORD)VDI_CF_PIX(seed_row, seed.x) != target) {
                 continue;
             }
 
             left = seed.x;
             right = seed.x;
             while (left > clip.x0 &&
-                   (WORD)_CF_PIX(seed_row, left - 1) == target) {
+                   (WORD)VDI_CF_PIX(seed_row, left - 1) == target) {
                 --left;
             }
             while (right < clip.x1 &&
-                   (WORD)_CF_PIX(seed_row, right + 1) == target) {
+                   (WORD)VDI_CF_PIX(seed_row, right + 1) == target) {
                 ++right;
             }
 
@@ -441,11 +442,11 @@ VOID v_contourfill(WORD handle, WORD x, WORD y, WORD index)
                 if (scan_y < clip.y0 || scan_y > clip.y1) {
                     continue;
                 }
-                scan_row = _CF_ROW(scan_y);
+                scan_row = VDI_CF_ROW(scan_y);
 
                 while (scan_x <= right) {
                     while (scan_x <= right &&
-                           (WORD)_CF_PIX(scan_row, scan_x) != target) {
+                           (WORD)VDI_CF_PIX(scan_row, scan_x) != target) {
                         ++scan_x;
                     }
                     if (scan_x > right) {
@@ -457,15 +458,15 @@ VOID v_contourfill(WORD handle, WORD x, WORD y, WORD index)
                         ++stack_size;
                     }
                     while (scan_x <= right &&
-                           (WORD)_CF_PIX(scan_row, scan_x) == target) {
+                           (WORD)VDI_CF_PIX(scan_row, scan_x) == target) {
                         ++scan_x;
                     }
                 }
             }
         }
 
-#undef _CF_ROW
-#undef _CF_PIX
+#undef VDI_CF_ROW
+#undef VDI_CF_PIX
     }
 
     gem_os_free(stack);

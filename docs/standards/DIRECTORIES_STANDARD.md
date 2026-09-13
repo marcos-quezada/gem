@@ -6,12 +6,14 @@ editor backups, stray object files or temporary files in the tree.
 
 ## Project layout
 
-- `src/`: project implementation `.c` files.
+- `src/`: project implementation `.c` files. Bundled user applications live
+  one directory per application under `src/apps/` and build into `bin/apps/`.
 - `samples/`: independent applications with `src/`, `include/`, `lib/` and `data/`.
   Integrated executables go in `bin/samples/`, private libraries in
   `bin/samples/lib/`, and resources in `bin/samples/data/`. Only build entry points belong at the samples root.
-- `include/`: GEM headers only. Sample headers belong in `samples/include/`;
-  test-only headers belong in `tests/include/`.
+- `include/`: GEM headers only. Application-private headers stay beside their
+  sources; sample interfaces belong in `samples/include/`; test-only headers
+  belong in `tests/include/`.
   Shared transport declarations belong in `include/gem/gemd.h`.
 - `lib/`: GEM implementation dependencies and platform backends only.
   Sample-specific and third-party application libraries go in `samples/lib/`.
@@ -28,10 +30,11 @@ editor backups, stray object files or temporary files in the tree.
   generators live in `tools/resgen/`; container recipes live in `tools/container/`.
 - `.vscode/`: editor build, launch and debugging configuration.
 
-Public GEM headers must live in `include/`. Project implementation source may live
-in `src/` or a library directory under `lib/`; sample application source
-belongs in `samples/src/` or `samples/lib/`. Automated test source belongs
-in `tests/`, and development utility source belongs in `tools/`.
+Public GEM headers must live in `include/`. Project implementation source may
+live in `src/` or a library directory under `lib/`; bundled application source
+belongs in `src/apps/<application>/`; independent sample source belongs in
+`samples/src/` or `samples/lib/`. Automated test source belongs in `tests/`,
+and development utility source belongs in `tools/`.
 Use lowercase snake_case for C source and header file names.
 
 Only normal top-level project metadata, such as `LICENSE`, `README.md`,

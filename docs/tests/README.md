@@ -17,14 +17,15 @@ these subset targets do not regenerate the full report. A direct CTest rerun
 also leaves `LATEST.md` describing the previous full run. Archive reports may
 have fewer tests than the current suite because tests were added later.
 
-`test_sample_session` additionally checks the complete F5 sample startup and
-cleanup in a separate headless session, including the MSA/Stout guest path.
+`test_sample_session` additionally checks the complete bundled-and-sample
+application startup and cleanup in a separate headless session, including the
+MSA/Stout guest path.
 It also drags Stout three times, moves and closes Terminal, and verifies
 window coordinates, framebuffer changes and independent RPC responsiveness.
 Terminal checks require median echo latency below 50 ms, every measured echo
 below 200 ms, and correct shell output from typing at 40 characters/second.
 `uat_calc_direct` and `uat_calc_proxy` check all 24 calculator buttons, digit
-entry, clearing and `7 + 2 = 9` using the shipped sample binaries.
+entry, clearing and `7 + 2 = 9` using the shipped Calculator binaries.
 The session logs, state and interaction captures live in `build/sample_session_test/`.
 See the [F5 interaction regression](F5_INTERACTION.md) for the reproduced
 failure, fix and before/after evidence.
@@ -38,7 +39,9 @@ See [UAT scenarios](UAT.md), [API scope](../architecture/API_TRANSPORT.md) and
 
 `uat_desktop_direct` and `uat_desktop_proxy` verify disk, Workspace and Trash
 bitmaps, double-click Workspace, enter a fixture directory, return to its
-parent and close the file manager. Captured screens and results are in
+parent and close the file manager. They also verify the Name, Date, Size and
+Type list header, centered dotted-separated rows, fixed count/size status band
+and metadata fields. Captured screens and results are in
 `build/uat/desktop_direct/` and `build/uat/desktop_proxy/`.
 See [desktop regression](DESKTOP.md) for the causes and repair.
 
@@ -69,6 +72,12 @@ The normal sample disk and IMGVIEW files belong in `samples/data/`.
 See [security/build audit](SECURITY_AUDIT.md) for scan coverage, finding
 classification, standalone SDK and Docker verification. Dated reports preserve
 failed intermediate runs so regressions and their fixes remain visible.
+
+`test_aes_shell` exercises direct shell-start synthesis, environment/file
+lookup, the shell-buffer size query and concurrent complete-buffer updates.
+`test_aes_rpc` additionally launches two proxy applications in parallel and
+checks their distinct ids, commands and TOS tails, missing-program failure and
+the absence of child launch variables in the parent.
 
 `test_rasta_polarity` runs the downloaded viewer's core tests plus the local
 inverse-mode regression. It verifies black ink/white paper in decoded RGB,

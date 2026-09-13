@@ -7,8 +7,9 @@
  * Copyright (C) 2026 tomaz stih
  */
 #include "gem_protocol.h"
+#include "platform/os.h"
+
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 static unsigned char *resource;
 static size_t resource_size;
@@ -73,46 +74,71 @@ static int fix_bit(BITBLK *bit)
 }
 WORD rsrc_free(void)
 {
-    free(resource);
+    gem_os_free(resource);
     resource = NULL;
     resource_size = 0;
     return 1;
 }
 WORD rsrc_load(char *filename)
 {
-    char path[260];
+    char path[GEM_OS_PATH_MAX];
+    const char *resource_dir;
+    gem_os_file_info_t info;
+    unsigned char *bytes;
+    size_t used = 0u;
+    int fd;
+    int length;
+
     if (!filename || strlen(filename) >= sizeof(path))
         return 0;
-    strcpy(path, filename);
-    if (!shel_find(path))
-        return 0;
-    FILE *stream = fopen(path, "rb");
-    if (!stream)
-        return 0;
-    if (fseek(stream, 0, SEEK_END)) {
-        fclose(stream);
+    resource_dir = gem_os_getenv_ref("GEM_RESOURCE_DIR");
+    if (resource_dir != NULL && resource_dir[0] != '\0') {
+        length = snprintf(path, sizeof(path), "%s/%s", resource_dir, filename);
+        if (length <= 0 || (size_t)length >= sizeof(path) ||
+            gem_os_access(path, GEM_OS_ACCESS_READ) == 0) {
+            path[0] = '\0';
+        }
+    } else {
+        path[0] = '\0';
+    }
+    if (path[0] == '\0') {
+        strcpy(path, filename);
+        if (shel_find(path) == 0) {
+            return 0;
+        }
+    }
+    if (gem_os_stat_path(path, &info) == 0 || info.is_directory != 0 ||
+        info.size_bytes < sizeof(RSHDR) ||
+        info.size_bytes > 8u * 1024u * 1024u) {
         return 0;
     }
-    long size = ftell(stream);
-    if (size < (long)sizeof(RSHDR) || size > 8 * 1024 * 1024 ||
-        fseek(stream, 0, SEEK_SET)) {
-        fclose(stream);
+    fd = gem_os_open_read(path);
+    if (fd < 0) {
         return 0;
     }
-    unsigned char *bytes = malloc((size_t)size);
-    if (!bytes) {
-        fclose(stream);
+    bytes = gem_os_alloc((size_t)info.size_bytes);
+    if (bytes == NULL) {
+        (void)gem_os_close(fd);
         return 0;
     }
-    size_t count = fread(bytes, 1, (size_t)size, stream);
-    fclose(stream);
-    if (count != (size_t)size) {
-        free(bytes);
+    while (used < (size_t)info.size_bytes) {
+        int32_t count =
+            gem_os_read(fd, bytes + used, (uint32_t)(info.size_bytes - used));
+
+        if (count <= 0) {
+            gem_os_free(bytes);
+            (void)gem_os_close(fd);
+            return 0;
+        }
+        used += (size_t)count;
+    }
+    if (gem_os_close(fd) != 0) {
+        gem_os_free(bytes);
         return 0;
     }
     rsrc_free();
     resource = bytes;
-    resource_size = count;
+    resource_size = used;
     return 1;
 }
 WORD rsrc_gaddr(WORD type, WORD index, void **address)

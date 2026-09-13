@@ -79,20 +79,25 @@ int gem_aes_validate(const gem_aes_packet_t *p)
         case rpc_shel_read:
             if ((260) < 0 || p->counts[0] != ((260) + 1) / 2)
                 return 0;
-            if ((260) < 0 || p->counts[1] != ((260) + 1) / 2)
+            if (p->counts[1] != (128 + 1) / 2)
                 return 0;
             return 1;
         case rpc_shel_write:
             if (!p->counts[3] || p->counts[3] > 1024 ||
                 !memchr(p->data + (0), 0, p->counts[3] * 2u))
                 return 0;
-            if (!p->counts[4] || p->counts[4] > 1024 ||
-                !memchr(p->data + (p->counts[3]), 0, p->counts[4] * 2u))
+            if (!p->counts[4] ||
+                ((unsigned char *)(p->data + (p->counts[3])))[0] > 127u ||
+                p->counts[4] !=
+                    (((unsigned char *)(p->data + (p->counts[3])))[0] + 2u) /
+                        2u)
                 return 0;
             return 1;
         case rpc_shel_get:
-            if (((int)p->args[1]) < 0 ||
-                p->counts[0] != (((int)p->args[1]) + 1) / 2)
+            if (((int)p->args[1]) == SHEL_BUFSIZE
+                    ? p->counts[0] != 0
+                    : (((int)p->args[1]) < 0 ||
+                       p->counts[0] != (((int)p->args[1]) + 1) / 2))
                 return 0;
             return 1;
         case rpc_shel_put:

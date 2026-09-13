@@ -1,7 +1,8 @@
 /*
- * Implements private font loading, font selection, and glyph rendering
- * for the hosted GEM VDI layer. Separating font runtime state from the
- * surface and cursor helpers keeps text-related work localized.
+ * Loads and manages GEM bitmap fonts for the hosted VDI: locating the
+ * font directory, validating file layout and glyph offset tables, slot
+ * allocation for bundled and dynamically loaded fonts, selection and the
+ * name/id queries. Glyph metrics and rendering live in glyphs.c.
  *
  * MIT License (see: LICENSE)
  * Copyright (C) 2026 tomaz stih
@@ -9,9 +10,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include "vdi_internal.h"
-
-#include "vdi_state.h"
+#include "fonts_private.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -19,50 +18,19 @@
 #include <string.h>
 #include <unistd.h>
 
-enum {
-    vdi_max_fonts = 16,
-    vdi_font_id_system = 1,
-    vdi_font_id_small_internal = 2,
-    vdi_font_id_ibm = 3,
-    vdi_font_id_small = 5
-};
-
-typedef struct vdi_font {
-    WORD font_id;
-    char name[33];
-    char file_name[64];
-    WORD first_ade;
-    WORD last_ade;
-    WORD top;
-    WORD ascent;
-    WORD half;
-    WORD descent;
-    WORD bottom;
-    WORD max_char_width;
-    WORD max_cell_width;
-    WORD form_width;
-    WORD form_height;
-    uint32_t data_offset;
-    uint32_t off_offset;
-    uint8_t *data;
-    size_t data_size;
-    WORD uniform_width;
-    int present;
-    int resident;
-} vdi_font_t;
-
 static vdi_font_t g_vdi_fonts[vdi_max_fonts];
 static WORD g_vdi_current_font = vdi_font_id_system;
 static int g_vdi_fonts_loaded;
 
-static uint16_t read_le16(const uint8_t *bytes)
+uint16_t vdi_font_read_le16(const uint8_t *bytes)
 {
     return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
 }
 
 static uint32_t read_le32(const uint8_t *bytes)
 {
-    return (uint32_t)read_le16(bytes) | ((uint32_t)read_le16(bytes + 2) << 16);
+    return (uint32_t)vdi_font_read_le16(bytes) |
+           ((uint32_t)vdi_font_read_le16(bytes + 2) << 16);
 }
 
 static const char *font_dir(void)
@@ -160,62 +128,9 @@ static vdi_font_t *find_font_by_id(WORD font_id)
     return &g_vdi_fonts[slot];
 }
 
-static vdi_font_t *current_font(void)
+vdi_font_t *vdi_current_font(void)
 {
     return find_font_by_id(g_vdi_current_font);
-}
-
-static WORD glyph_index(const vdi_font_t *font, unsigned int ch)
-{
-    if (font == NULL || !font->resident) {
-        return -1;
-    }
-    if (ch < (unsigned int)font->first_ade ||
-        ch > (unsigned int)font->last_ade) {
-        return -1;
-    }
-    return (WORD)(ch - (unsigned int)font->first_ade);
-}
-
-static WORD glyph_start_bit(const vdi_font_t *font, WORD index)
-{
-    const uint8_t *table;
-
-    if (font == NULL || !font->resident || index < 0) {
-        return 0;
-    }
-
-    table = font->data + font->off_offset + (size_t)index * 2u;
-    return (WORD)read_le16(table);
-}
-
-static WORD glyph_end_bit(const vdi_font_t *font, WORD index)
-{
-    const uint8_t *table;
-
-    if (font == NULL || !font->resident || index < 0) {
-        return 0;
-    }
-
-    table = font->data + font->off_offset + (size_t)(index + 1) * 2u;
-    return (WORD)read_le16(table);
-}
-
-static WORD glyph_width(const vdi_font_t *font, unsigned int ch)
-{
-    WORD index;
-
-    if (font == NULL || !font->resident) {
-        return 0;
-    }
-    if (font->uniform_width > 0) {
-        return font->uniform_width;
-    }
-    index = glyph_index(font, ch);
-    if (index < 0) {
-        return font->max_char_width;
-    }
-    return (WORD)(glyph_end_bit(font, index) - glyph_start_bit(font, index));
 }
 
 static void clear_font_runtime(vdi_font_t *font)
@@ -271,7 +186,7 @@ int vdi_font_bitmap_valid(const uint8_t *data, size_t size, WORD first,
         entries * 2 > size - table_offset)
         return 0;
     for (i = 0; i < entries; ++i) {
-        uint16_t bit = read_le16(data + table_offset + i * 2);
+        uint16_t bit = vdi_font_read_le16(data + table_offset + i * 2);
         if (bit < previous || bit > (unsigned)width * 8u)
             return 0;
         previous = bit;
@@ -334,17 +249,17 @@ static int load_font_file(vdi_font_t *font, WORD font_id, const char *file_name)
     font->file_name[sizeof(font->file_name) - 1u] = '\0';
     memcpy(font->name, data + 4, 32u);
     font->name[32] = '\0';
-    font->first_ade = (WORD)read_le16(data + 36);
-    font->last_ade = (WORD)read_le16(data + 38);
-    font->top = (WORD)read_le16(data + 40);
-    font->ascent = (WORD)read_le16(data + 42);
-    font->half = (WORD)read_le16(data + 44);
-    font->descent = (WORD)read_le16(data + 46);
-    font->bottom = (WORD)read_le16(data + 48);
-    font->max_char_width = (WORD)read_le16(data + 50);
-    font->max_cell_width = (WORD)read_le16(data + 52);
-    font->form_width = (WORD)read_le16(data + 80);
-    font->form_height = (WORD)read_le16(data + 82);
+    font->first_ade = (WORD)vdi_font_read_le16(data + 36);
+    font->last_ade = (WORD)vdi_font_read_le16(data + 38);
+    font->top = (WORD)vdi_font_read_le16(data + 40);
+    font->ascent = (WORD)vdi_font_read_le16(data + 42);
+    font->half = (WORD)vdi_font_read_le16(data + 44);
+    font->descent = (WORD)vdi_font_read_le16(data + 46);
+    font->bottom = (WORD)vdi_font_read_le16(data + 48);
+    font->max_char_width = (WORD)vdi_font_read_le16(data + 50);
+    font->max_cell_width = (WORD)vdi_font_read_le16(data + 52);
+    font->form_width = (WORD)vdi_font_read_le16(data + 80);
+    font->form_height = (WORD)vdi_font_read_le16(data + 82);
     font->data = data;
     font->data_size = (size_t)file_size;
 
@@ -390,10 +305,10 @@ static int load_font_file(vdi_font_t *font, WORD font_id, const char *file_name)
             off_offset + (size_t)(num_glyphs + 1u) * 2u <= (size_t)file_size) {
             const uint8_t *ot = data + off_offset;
 
-            w0 = (WORD)(read_le16(ot + 2u) - read_le16(ot));
+            w0 = (WORD)(vdi_font_read_le16(ot + 2u) - vdi_font_read_le16(ot));
             for (g = 1; g < num_glyphs; ++g) {
-                WORD w = (WORD)(read_le16(ot + (size_t)(g + 1u) * 2u) -
-                                read_le16(ot + (size_t)g * 2u));
+                WORD w = (WORD)(vdi_font_read_le16(ot + (size_t)(g + 1u) * 2u) -
+                                vdi_font_read_le16(ot + (size_t)g * 2u));
 
                 if (w != w0) {
                     uniform = 0;
@@ -558,7 +473,7 @@ WORD vdi_load_external_fonts(void)
 
 WORD vdi_unload_external_fonts(void)
 {
-    vdi_font_t *current = current_font();
+    vdi_font_t *current = vdi_current_font();
 
     unload_external_font_slots();
     if (current == NULL || !current->present || !current->resident) {
@@ -644,205 +559,4 @@ const char *vdi_font_name(WORD element_num)
         }
     }
     return NULL;
-}
-
-WORD vdi_font_cell_width(void)
-{
-    vdi_font_t *font = current_font();
-
-    return (font != NULL) ? font->max_char_width : 0;
-}
-
-WORD vdi_font_text_height(void)
-{
-    vdi_font_t *font = current_font();
-
-    return (font != NULL) ? font->form_height : 0;
-}
-
-WORD vdi_font_ascent(void)
-{
-    vdi_font_t *font = current_font();
-
-    return (font != NULL) ? font->ascent : 0;
-}
-
-WORD vdi_font_first_ade(void)
-{
-    vdi_font_t *font = current_font();
-
-    return (font != NULL) ? font->first_ade : 0;
-}
-
-WORD vdi_font_last_ade(void)
-{
-    vdi_font_t *font = current_font();
-
-    return (font != NULL) ? font->last_ade : 0;
-}
-
-WORD vdi_char_cell_width(char ch)
-{
-    vdi_font_t *font = current_font();
-
-    return glyph_width(font, (unsigned char)ch);
-}
-
-WORD vdi_string_width(const char *string)
-{
-    vdi_font_t *font;
-    WORD width;
-
-    if (string == NULL) {
-        return 0;
-    }
-
-    font = current_font();
-    if (font != NULL && font->uniform_width > 0) {
-        return (WORD)(strlen(string) * (size_t)font->uniform_width);
-    }
-
-    width = 0;
-    while (*string != '\0') {
-        width = (WORD)(width + vdi_char_cell_width(*string));
-        ++string;
-    }
-    return width;
-}
-
-void vdi_draw_glyph(WORD x, WORD y, char ch, WORD color)
-{
-    vdi_font_t *font = current_font();
-    vdi_rect_t clip;
-    WORD opaque_background = vdi_text_background_mode();
-    WORD index;
-    WORD start_bit;
-    WORD width;
-    WORD clip_col0;
-    WORD clip_col1;
-    WORD row_index;
-
-    if (font == NULL) {
-        return;
-    }
-
-    index = glyph_index(font, (unsigned char)ch);
-    if (index < 0) {
-        index = glyph_index(font, (unsigned char)'?');
-        if (index < 0) {
-            return;
-        }
-    }
-
-    if (font->uniform_width > 0) {
-        start_bit = (WORD)((LONG)index * font->uniform_width);
-        width = font->uniform_width;
-    } else {
-        start_bit = glyph_start_bit(font, index);
-        width = (WORD)(glyph_end_bit(font, index) - start_bit);
-    }
-    if (width <= 0) {
-        return;
-    }
-
-    vdi_get_active_clip_rect(&clip);
-
-    clip_col0 = (clip.x0 > x) ? (WORD)(clip.x0 - x) : 0;
-    clip_col1 = (clip.x1 < (WORD)(x + width - 1)) ? (WORD)(clip.x1 - x)
-                                                  : (WORD)(width - 1);
-    if (clip_col0 > clip_col1) {
-        return;
-    }
-
-    vdi_prepare_screen_write();
-    vdi_mark_dirty((WORD)(x + clip_col0), y, (WORD)(x + clip_col1),
-                   (WORD)(y + font->form_height - 1));
-
-    for (row_index = 0; row_index < font->form_height; ++row_index) {
-        WORD draw_y = (WORD)(y + row_index);
-        const uint8_t *glyph_row;
-        WORD col;
-
-        if (draw_y < clip.y0 || draw_y > clip.y1) {
-            continue;
-        }
-
-        if (opaque_background != 0) {
-            vdi_draw_screen_hline_direct(draw_y, (WORD)(x + clip_col0),
-                                         (WORD)(x + clip_col1), 0);
-        }
-
-        glyph_row = font->data + font->data_offset +
-                    (size_t)row_index * (size_t)font->form_width;
-
-        col = clip_col0;
-        while (col <= clip_col1) {
-            WORD abs_bit = (WORD)(start_bit + col);
-            size_t byte_off = (size_t)abs_bit / 8u;
-            unsigned int bit_in_byte = 7u - ((unsigned int)abs_bit & 7u);
-
-            if (byte_off < font->data_size &&
-                !(glyph_row[byte_off] & (uint8_t)(1u << bit_in_byte))) {
-                ++col;
-                continue;
-            }
-
-            {
-                WORD run_start = col;
-
-                ++col;
-                while (col <= clip_col1) {
-                    abs_bit = (WORD)(start_bit + col);
-                    byte_off = (size_t)abs_bit / 8u;
-                    bit_in_byte = 7u - ((unsigned int)abs_bit & 7u);
-                    if (byte_off >= font->data_size ||
-                        !(glyph_row[byte_off] & (uint8_t)(1u << bit_in_byte))) {
-                        break;
-                    }
-                    ++col;
-                }
-                vdi_draw_screen_hline_direct(draw_y, (WORD)(x + run_start),
-                                             (WORD)(x + col - 1), color);
-            }
-        }
-    }
-}
-
-char vdi_scancode_to_ascii(uint16_t key)
-{
-    if (key >= 4u && key <= 29u) {
-        return (char)('a' + (char)(key - 4u));
-    }
-    if (key >= 30u && key <= 38u) {
-        return (char)('1' + (char)(key - 30u));
-    }
-
-    switch (key) {
-        case 39u:
-            return '0';
-        case 40u:
-            return '\n';
-        case 42u:
-            return '\b';
-        case 44u:
-            return ' ';
-        case 45u:
-            return '-';
-        case 47u:
-            return '[';
-        case 48u:
-            return ']';
-        case 51u:
-            return ';';
-        case 52u:
-            return '\'';
-        case 54u:
-            return ',';
-        case 55u:
-            return '.';
-        case 56u:
-            return '/';
-        default:
-            return '\0';
-    }
 }

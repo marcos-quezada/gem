@@ -34,10 +34,12 @@ enum {
     AES_MAX_WINDOWS = 16,
     AES_MAX_MENU_SAVED_REGIONS = 2,
     AES_PATH_LEN = 260,
-    AES_SHELL_BUF_LEN = 1024,
     AES_DECOR = 8,
     AES_CHAR_WIDTH = 6,
-    AES_CHAR_HEIGHT = 8
+    AES_CHAR_HEIGHT = 8,
+    AES_MENU_ITEM_PADDING = 14,
+    AES_MENU_TICK_OFFSET = 3,
+    AES_MENU_SHORTCUT_GAP = 12
 };
 
 typedef struct aes_message {
@@ -135,11 +137,6 @@ typedef struct aes_state {
     GRECT menu_saved_rects[AES_MAX_MENU_SAVED_REGIONS];
     uint8_t *menu_saved_pixels[AES_MAX_MENU_SAVED_REGIONS];
     char scrap_path[AES_PATH_LEN];
-    char shell_cmd[AES_PATH_LEN];
-    char shell_tail[AES_PATH_LEN];
-    char shell_dir[AES_PATH_LEN];
-    char shell_buf[AES_SHELL_BUF_LEN];
-    WORD shell_buf_len;
     void *resource_data;
     size_t resource_size;
     WORD resource_is_builtin;
@@ -212,6 +209,19 @@ WORD aes_chrome_height(void);
 WORD aes_menu_chrome_height(void);
 
 /*
+ * Nonzero while any application has a menu installed. The bar strip then
+ * stays reserved (and is painted empty) when the active application has
+ * no menu, so windows and the desktop keep their positions.
+ */
+int aes_menu_strip_reserved(void);
+
+/*
+ * Paints the reserved menu strip without titles: the active application
+ * has no menu. Does nothing when no strip is reserved.
+ */
+void aes_menu_draw_empty_bar(void);
+
+/*
  * Returns the pixel width of one C string in the active VDI font.
  */
 WORD vdi_string_width(const char *string);
@@ -269,6 +279,11 @@ WORD aes_menu_key_event(OBJECT *tree, const gem_hid_event_t *evt,
                         WORD mepbuff[8]);
 WORD aes_menu_event(OBJECT *tree, const gem_hid_event_t *first_evt,
                     WORD mepbuff[8]);
+/* Track a chrome press to its release; returns MU_MESAG when a resulting
+ * window message was dequeued into mepbuff, otherwise 0. */
+WORD aes_track_window_interaction(const gem_hid_event_t *first_evt, WORD flags,
+                                  WORD mepbuff[8], WORD *pmx, WORD *pmy,
+                                  WORD *pmb, WORD *pks);
 WORD aes_min_word(WORD left, WORD right);
 WORD aes_max_word(WORD left, WORD right);
 void aes_set_rect(GRECT *rect, WORD x, WORD y, WORD w, WORD h);

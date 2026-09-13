@@ -1,5 +1,8 @@
 add_executable(gemd
     main.c
+    session.c
+    dispatch_vdi.c
+    dispatch_aes.c
     transport.c
     drawing.c
     aes_dispatch.c

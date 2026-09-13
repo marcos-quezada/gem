@@ -1,17 +1,22 @@
 # Independent samples
 
-`samples/` is a separate CMake project. It uses public GEM headers and compiled
-GEM libraries; it does not compile core sources or include private core headers.
-The root build also includes this project so `make` still builds everything.
+`samples/` is a separate CMake project containing the independent examples. It
+uses public GEM headers and compiled GEM libraries; it does not compile core
+sources or include private core headers. The root build also includes this
+project so `make` still builds everything. Desktop, Terminal, Clock and
+Calculator are bundled applications under `src/apps/`, not samples.
 
 ## Layout and ownership
 
-- `samples/src/`: desktop, calculator, clock, Gemscape, Maestro, terminal,
-  Stout emulator and MSA disk utility sources, with nested CMake files.
-- `samples/include/`: application headers and FAT12, MSA and PRG interfaces.
+- `samples/src/`: Gemscape, Maestro, Stout emulator and MSA disk utility
+  sources, with nested CMake files.
+- `samples/include/`: shared sample headers and FAT12, MSA and PRG interfaces.
+  Headers used by one application's own modules stay beside its sources.
 - `samples/data/`: Atari disk images, historical IMGVIEW files, icon sources
   and sample artwork. Generated resources go to each sample runtime `data/`.
-- `samples/lib/`: resource lookup, FAT12, MSA and PRG implementations.
+- `samples/lib/`: resource lookup and resource bit-block copying, FAT12, MSA
+  and PRG implementations. The integrated Clock currently shares the resource
+  helper with Gemscape and Maestro.
   `samples/lib/musashi/` contains only the Musashi build recipe and local patch;
   upstream source is downloaded into the selected build directory.
 - `samples/CMakeLists.txt` and `samples/Makefile`: standalone build entry points.
@@ -19,8 +24,9 @@ The root build also includes this project so `make` still builds everything.
 Stout uses PRG and Musashi. The MSA utility uses MSA and FAT12. These libraries
 have no consumers in the GEM core. Root `lib/` retains GEM platform backends;
 root `include/` retains GEM API, host abstraction and transport headers.
-UAT-specific headers are in `tests/include/`. Demo19 builds the terminal source
-from `samples/src/terminal/`, so the samples have no dependency on test sources.
+UAT-specific headers are in `tests/include/`. Demo19 reuses the bundled
+Terminal source from `src/apps/terminal/`; the samples still have no dependency
+on test sources.
 
 ## Build against a GEM SDK
 
@@ -58,8 +64,9 @@ Git and network access are required for the first dependency download;
 subsequent builds use the cached source. `GEM_SDK_INCLUDE_DIR`
 and the `GEM_<name>_LIBRARY` cache entries also permit explicit SDK locations.
 
-The integrated root build writes applications to `bin/samples/` and their
-private libraries to `bin/samples/lib/`. Core libraries remain in `bin/lib/`.
+The integrated root build writes these examples to `bin/samples/` and their
+private libraries to `bin/samples/lib/`. Bundled applications are in
+`bin/apps/`, and core libraries remain in `bin/lib/`.
 Build paths supply runtime library lookup; when relocating binaries, retain
 sample libraries and configure lookup for the installed GEM libraries.
 
@@ -72,11 +79,22 @@ The default GUI binaries link libgem and can share one server. Their
 `*_hosted` alternatives link AES/VDI directly and need their own display
 sessions. F5 uses the shared variants; see the [session guide](HOSTED_DEVELOPMENT.md).
 
-`make tests` in the root checkout runs the full GEM and UAT suites. The terminal
-is exercised by demo19. The MSA command-line tool exposes usage with `--help`;
-[Stout](../notes/STOUT.md) expects an Atari executable path. Local Musashi safety and warning fixes are recorded in
-[the patch notes](../notes/MUSASHI_PATCHES.md); upstream licenses and conventions
-remain intact.
+`make tests` in the root checkout runs the full GEM and UAT suites. The bundled
+Terminal is exercised by demo19. It launches its shell through the platform OS wrapper,
+advertises `TERM=vt100`, and implements the DEC VT100 control set needed by
+interactive and full-screen terminal programs: cursor movement, erase and edit
+operations, scrolling regions, saved cursor state, alternate screen buffers,
+tabs, DEC line drawing, device/status reports and monochrome bold, underline and
+reverse-video attributes. Keyboard translation includes application cursor
+keys and the common editing and function keys. The PTY wrapper removes inherited
+host-terminal capability variables so programs cannot mistake GEM Terminal for
+VTE, Kitty or another modern color terminal. Unsupported control strings are
+consumed through their terminator, and UTF-8 box-drawing characters have
+readable monochrome fallbacks. The MSA command-line tool
+exposes usage with `--help`; [Stout](../notes/STOUT.md) expects an Atari
+executable path. Local Musashi safety and warning fixes are recorded in
+[the patch notes](../notes/MUSASHI_PATCHES.md); upstream licenses and
+conventions remain intact.
 
 The scripts exporting the SDK and packaging Gemix live in `tools/scripts/`.
 The downloaded Musashi `readme.txt` and `history.txt` describe the upstream core;
@@ -88,11 +106,18 @@ to enter it and `..` to go up. The Desk menu lists open browser windows.
 Automated direct/proxy coverage is described in [desktop UAT](../tests/DESKTOP.md).
 
 Desktop menus expose implemented actions only: Desk has Desktop info and
-open file-manager windows, File has Open, and Arrange has Show as icons and
-Sort by name. Unused browser slots take no space. A single click selects a
-Workspace/disk icon; double-click its image or label, or choose File → Open,
-to browse it. Other sample windows may cover the icon and must be moved to
-expose the intended click target.
+open file-manager windows, File has Open, and Arrange switches between list
+and icon views and sorts by name, date, size or type. List view shows all four
+fields in the system font under matching clickable system-font headers. Its
+metric-derived band matches Gemscape's address row and the scrollbar up-arrow
+square. Centered rows use compact `/name` directory labels and dotted
+separators, and a fixed system-font status band reports file/folder counts and
+total size. Icon view uses a wider horizontal pitch so neighboring icons and
+labels remain distinct. List view opens without a selected entry. Unused
+browser slots take no space.
+A single click selects a Workspace/disk icon; double-click its image or label,
+or choose File → Open, to browse it. Other sample windows may cover the icon
+and must be moved to expose the intended click target.
 
 Sample resource lookup tries `GEM_SAMPLE_DATA`, then `data/` beside the running
 executable, then the configured sample build data path. Core fonts, cursors and

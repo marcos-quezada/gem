@@ -8,6 +8,7 @@ target_include_directories(platform_linux
 )
 
 target_compile_features(platform_linux PUBLIC c_std_11)
+target_link_libraries(platform_linux PUBLIC Threads::Threads)
 
 target_compile_options(platform_linux
     PRIVATE

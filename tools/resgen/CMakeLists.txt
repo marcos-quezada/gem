@@ -1,4 +1,4 @@
-add_executable(resgen resgen.c)
+add_executable(resgen resgen.c png_form.c rsc_writer.c)
 
 set_target_properties(resgen PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}

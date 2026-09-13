@@ -58,6 +58,22 @@ set_tests_properties(test_vdi_rpc PROPERTIES LABELS integration TIMEOUT 30
     ENVIRONMENT "GEM_RESOURCE_DIR=${GEM_RESOURCES_DIR};ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
 
 add_executable(test_aes_rpc test_aes_rpc.c)
+add_executable(shell_clock_child shell_child.c)
+add_executable(shell_term_child shell_child.c)
+set_target_properties(shell_clock_child shell_term_child PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${GEM_OUTPUT_ROOT}/tests/shell_apps"
+    BUILD_WITH_INSTALL_RPATH FALSE BUILD_RPATH "${GEM_LIBRARY_DIR}")
+set_target_properties(shell_clock_child PROPERTIES OUTPUT_NAME "clock.app")
+set_target_properties(shell_term_child PROPERTIES OUTPUT_NAME "term.app")
+target_link_libraries(shell_clock_child PRIVATE gem)
+target_link_libraries(shell_term_child PRIVATE gem)
+foreach(shell_child IN ITEMS shell_clock_child shell_term_child)
+    target_compile_options(${shell_child} PRIVATE -Wall -Wextra -pedantic
+        -UNDEBUG $<$<CONFIG:Debug>:-g;-fsanitize=address,undefined>)
+    target_link_options(${shell_child} PRIVATE
+        $<$<CONFIG:Debug>:-fsanitize=address,undefined>)
+endforeach()
+add_dependencies(test_aes_rpc shell_clock_child shell_term_child)
 target_link_libraries(test_aes_rpc PRIVATE gem)
 target_compile_options(test_aes_rpc PRIVATE -Wall -Wextra -pedantic -UNDEBUG
     $<$<CONFIG:Debug>:-g;-fsanitize=address,undefined>)
@@ -67,4 +83,5 @@ add_test(NAME test_aes_rpc COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run.sh
     $<TARGET_FILE:gemd> $<TARGET_FILE:test_aes_rpc>)
 set_tests_properties(test_aes_rpc PROPERTIES LABELS integration TIMEOUT 30
     RESOURCE_LOCK gem_rpc_hid
-    ENVIRONMENT "GEM_RESOURCE_DIR=${GEM_RESOURCES_DIR};ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
+    ENVIRONMENT
+        "GEM_RESOURCE_DIR=${GEM_RESOURCES_DIR};GEMIX_HOME=$<TARGET_FILE_DIR:shell_clock_child>;ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")

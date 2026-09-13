@@ -45,16 +45,6 @@ typedef struct gemscape_state {
     int full_open;
 } gemscape_state_t;
 
-static void gemscape_free_bitblk(BITBLK *bitblk)
-{
-    if (bitblk == NULL) {
-        return;
-    }
-
-    free((void *)(intptr_t)bitblk->bi_pdata);
-    memset(bitblk, 0, sizeof(*bitblk));
-}
-
 static void gemscape_free_toolbar_icons(gemscape_state_t *state)
 {
     WORD ii;
@@ -64,61 +54,9 @@ static void gemscape_free_toolbar_icons(gemscape_state_t *state)
     }
 
     for (ii = 0; ii < gemscape_toolbar_icon_count; ++ii) {
-        gemscape_free_bitblk(&state->toolbar_icons[ii]);
+        sample_free_bitblk(&state->toolbar_icons[ii]);
     }
     state->toolbar_icons_loaded = 0;
-}
-
-static int gemscape_clone_bitblk(BITBLK *dst, const BITBLK *src)
-{
-    size_t plane_bytes;
-    void *data_copy;
-
-    if (dst == NULL || src == NULL || src->bi_pdata == 0 || src->bi_wb <= 0 ||
-        src->bi_hl <= 0) {
-        return 0;
-    }
-
-    plane_bytes = (size_t)src->bi_wb * (size_t)src->bi_hl;
-    data_copy = malloc(plane_bytes);
-    if (data_copy == NULL) {
-        return 0;
-    }
-
-    memcpy(data_copy, (const void *)(intptr_t)src->bi_pdata, plane_bytes);
-    *dst = *src;
-    dst->bi_pdata = (LONG)(intptr_t)data_copy;
-    return 1;
-}
-
-static int gemscape_load_bitblks_from_resource(const char *primary_path,
-                                               const char *fallback_path,
-                                               BITBLK *bitblks, WORD count)
-{
-    BITBLK *bitblk;
-    WORD ii;
-
-    if (bitblks == NULL || count <= 0) {
-        return 0;
-    }
-    if (sample_resource_load((char *)primary_path) == 0 &&
-        sample_resource_load((char *)fallback_path) == 0) {
-        return 0;
-    }
-
-    for (ii = 0; ii < count; ++ii) {
-        if (rsrc_gaddr(R_BITBLK, ii, (void **)&bitblk) == 0 || bitblk == NULL ||
-            !gemscape_clone_bitblk(&bitblks[ii], bitblk)) {
-            for (WORD loaded = 0; loaded < ii; ++loaded) {
-                gemscape_free_bitblk(&bitblks[loaded]);
-            }
-            rsrc_free();
-            return 0;
-        }
-    }
-
-    rsrc_free();
-    return 1;
 }
 
 static int gemscape_load_toolbar_icons(gemscape_state_t *state)
@@ -127,9 +65,9 @@ static int gemscape_load_toolbar_icons(gemscape_state_t *state)
         return 0;
     }
 
-    state->toolbar_icons_loaded = gemscape_load_bitblks_from_resource(
-        "gemscape_toolbar.rsc", "gemscape_toolbar.rsc", state->toolbar_icons,
-        gemscape_toolbar_icon_count);
+    state->toolbar_icons_loaded =
+        sample_load_bitblks("gemscape_toolbar.rsc", "gemscape_toolbar.rsc",
+                            state->toolbar_icons, gemscape_toolbar_icon_count);
     return state->toolbar_icons_loaded;
 }
 

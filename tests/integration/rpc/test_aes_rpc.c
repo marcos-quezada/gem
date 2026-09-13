@@ -6,11 +6,45 @@
  * Copyright (C) 2026 tomaz stih
  */
 #include <gem.h>
+#include <gem/os.h>
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+
+typedef struct shell_child_result {
+    WORD app_id;
+    WORD argument_count;
+    char first_argument[128];
+    char command[256];
+    char tail[128];
+} shell_child_result_t;
+
 static WORD handle;
 static int callback_count;
+
+static void read_shell_result(const char *path, shell_child_result_t *result)
+{
+    gem_os_file_info_t info;
+    unsigned attempt;
+    int fd = -1;
+
+    for (attempt = 0u; attempt < 100u; ++attempt) {
+        if (gem_os_stat_path(path, &info) != 0 &&
+            info.size_bytes == sizeof(*result)) {
+            fd = gem_os_open_read(path);
+        }
+        if (fd >= 0) {
+            break;
+        }
+        gem_os_sleep_ms(20u);
+    }
+    assert(fd >= 0);
+    assert(gem_os_read(fd, result, sizeof(*result)) ==
+           (int32_t)sizeof(*result));
+    assert(gem_os_close(fd) == 0);
+}
+
 static WORD draw_user(LONG value)
 {
     PARMBLK *parm = (PARMBLK *)(intptr_t)value;
@@ -33,22 +67,76 @@ int main(void)
     assert(appl_write(app, 8, message));
     assert(appl_read(app, 8, received));
     assert(!memcmp(message, received, sizeof(message)));
-    char cmd[260], tail[260], dir[260];
-    assert(shel_write(0, 0, 0, "test.prg", "args"));
+    char cmd[260], tail[128] = {0}, dir[260];
     assert(shel_read(cmd, tail));
-    assert(!strcmp(cmd, "test.prg") && !strcmp(tail, "args"));
+    assert(strstr(cmd, "test_aes_rpc") != NULL && tail[0] == 0);
+    assert(shel_write(0, 0, 0, "test.prg", tail));
+    assert(shel_read(cmd, tail));
+    assert(strstr(cmd, "test_aes_rpc") != NULL && tail[0] == 0);
     assert(shel_wdef("other.prg", "/test"));
     assert(shel_rdef(cmd, dir));
     assert(!strcmp(cmd, "other.prg") && !strcmp(dir, "/test"));
-    char odd[3] = {'a', 'b', 'c'}, back[3] = {0};
+    char odd[3] = {'a', 'b', 'c'}, back[5] = {'x', 'x', 'x', 'x', 'x'};
     assert(shel_put(odd, 3));
-    assert(shel_get(back, 3));
+    assert(shel_get(NULL, SHEL_BUFSIZE) == 3);
+    assert(shel_get(back, 5));
     assert(!memcmp(odd, back, 3));
+    assert(back[3] == 'x' && back[4] == 'x');
+    {
+        char *home = NULL;
+        char *leaked = NULL;
+        char clock_path[260] = "clock.app";
+        char clock_result_path[GEM_OS_PATH_MAX];
+        char term_result_path[GEM_OS_PATH_MAX];
+        char clock_tail[128] = {0};
+        char term_tail[128] = {9, 'n', 'o', 't', 'e', 's', '.', 't', 'x', 't'};
+        shell_child_result_t clock_result;
+        shell_child_result_t term_result;
+        int length;
+
+        assert(shel_envrn(&home, "GEMIX_HOME="));
+        assert(!shel_envrn(&leaked, "GEM_SHEL_CMD="));
+        length = snprintf(clock_result_path, sizeof(clock_result_path),
+                          "%s/clock.result", home);
+        assert(length > 0 && (size_t)length < sizeof(clock_result_path));
+        length = snprintf(term_result_path, sizeof(term_result_path),
+                          "%s/term.result", home);
+        assert(length > 0 && (size_t)length < sizeof(term_result_path));
+        (void)gem_os_unlink(clock_result_path);
+        (void)gem_os_unlink(term_result_path);
+        assert(shel_find(clock_path));
+        assert(clock_path[0] == '/');
+        assert(shel_write(1, 1, 1, "clock.app", clock_tail));
+        assert(shel_write(1, 1, 1, "term.app", term_tail));
+        assert(!shel_write(1, 1, 1, "missing-gem-app", clock_tail));
+        read_shell_result(clock_result_path, &clock_result);
+        read_shell_result(term_result_path, &term_result);
+        assert(clock_result.app_id > 0 && term_result.app_id > 0);
+        assert(clock_result.app_id != term_result.app_id);
+        assert(!strcmp(clock_result.command, "clock.app"));
+        assert(clock_result.argument_count == 1);
+        assert(clock_result.tail[0] == 0);
+        assert(!strcmp(term_result.command, "term.app"));
+        assert(term_result.argument_count == 2);
+        assert(!strcmp(term_result.first_argument, "notes.txt"));
+        assert((unsigned char)term_result.tail[0] == 9u);
+        assert(!memcmp(term_result.tail + 1, "notes.txt", 9u));
+        assert(!shel_envrn(&leaked, "GEM_SHEL_CMD="));
+    }
     handle = graf_handle(NULL, NULL, NULL, NULL);
     assert(handle);
     WORD window = wind_create(NAME | CLOSER, 0, 0, 640, 400);
     assert(window > 0);
     assert(wind_open(window, 20, 20, 400, 300));
+    /* The work-area selector must round-trip; the frame then differs from
+     * it by the kind's borders in both directions. */
+    WORD wx, wy, ww, wh, fx, fy, fw, fh;
+    assert(wind_set(window, WF_CXYWH, 40, 60, 300, 200) == 1);
+    assert(wind_get(window, WF_CXYWH, &wx, &wy, &ww, &wh));
+    assert(wx == 40 && wy == 60 && ww == 300 && wh == 200);
+    assert(wind_get(window, WF_WXYWH, &fx, &fy, &fw, &fh));
+    assert(fx < wx && fy < wy && fw > ww && fh > wh);
+    assert(wind_set(window, WF_WXYWH, 20, 20, 400, 300) == 1);
     char buffer[16] = "AB";
     TEDINFO ted = {0};
     ted.te_ptext = (LONG)(intptr_t)buffer;
@@ -94,6 +182,19 @@ int main(void)
     assert(
         !strcmp((char *)(intptr_t)loaded[1].ob_spec, "Loaded from demo27.rsc"));
     assert(rsrc_free());
+    /* Extended object types keep the low byte; the wrapper must still send
+     * the title/entry strings gemd requires for that byte. */
+    OBJECT bar[7] = {{-1, 1, 4, G_IBOX, 0, 0, 0, 0, 0, 640, 20},
+                     {4, 2, 2, G_BOX, 0, 0, 0, 0, 0, 640, 20},
+                     {1, 3, 3, G_IBOX, 0, 0, 0, 0, 0, 640, 20},
+                     {2, -1, -1, (UWORD)(0x2100 | G_TITLE), 0, 0,
+                      (LONG)(intptr_t) " Menu ", 0, 0, 48, 20},
+                     {0, 5, 5, G_IBOX, 0, 0, 0, 0, 20, 640, 380},
+                     {4, 6, 6, G_BOX, 0, 0, 0, 0, 0, 100, 16},
+                     {5, -1, -1, (UWORD)(0x2100 | G_STRING), LASTOB, 0,
+                      (LONG)(intptr_t) "  Item", 0, 0, 100, 16}};
+    assert(menu_bar(bar, 1) == 1);
+    assert(menu_bar(bar, 0) == 1);
     wind_close(window);
     wind_delete(window);
     assert(menu_unregister(app));

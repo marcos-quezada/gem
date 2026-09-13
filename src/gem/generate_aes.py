@@ -17,9 +17,9 @@ shape = {
  'appl_write': {'pbuff':('i','8')}, 'appl_read': {'ap_rpbuff':('o','8')},
  'appl_tplay': {'pbuff':('i','length')}, 'appl_trecord': {'pbuff':('o','length')},
  'menu_register': {'pstr':('s','0')},
- 'shel_read': {'cmd':('b','260'),'tail':('b','260')},
- 'shel_write': {'cmd':('s','0'),'tail':('s','0')},
- 'shel_get': {'buf':('b','length')}, 'shel_put': {'buf':('j','length')},
+ 'shel_read': {'cmd':('b','260'),'tail':('t','128')},
+ 'shel_write': {'cmd':('s','0'),'tail':('u','128')},
+ 'shel_get': {'buf':('g','length')}, 'shel_put': {'buf':('j','length')},
  'shel_rdef': {'lpcmd':('b','260'),'lpdir':('b','260')},
  'shel_wdef': {'lpcmd':('s','0'),'lpdir':('s','0')},
 }
@@ -43,7 +43,7 @@ for ret,name,args in re.findall(r'\b(WORD|VOID)\s+(\w+)\s*\((.*?)\);',header,re.
   params.append((arg,pname,direction,count))
  functions.append((ret,name,params))
 ids=['    rpc_'+name+' = '+str(i+1)+',' for i,(_,name,_) in enumerate(functions)]
-h='''enum { GEM_AES_WORDS = 2048, GEM_AES_ARGS = 12 };
+h='''enum { GEM_AES_WORDS = 16384, GEM_AES_ARGS = 12 };
 typedef struct gem_aes_packet {
     WORD handle;
     uint16_t function;
@@ -83,19 +83,31 @@ for ret,name,params in functions:
    c.append(f'    size_t n{i} = {pname} ? strlen((const char *){pname}) + 1 : 1;')
    c.append(f'    n{i} = (n{i} + 1) / 2;')
    v.append(f'        if (!p->counts[{i}] || p->counts[{i}] > 1024 || !memchr(p->data + ({offset}), 0, p->counts[{i}]*2u)) return 0;')
+  elif direction=='u':
+   c.append(f'    size_t bytes{i} = {pname} ? (unsigned char){pname}[0] + 1u : 1u;')
+   c.append(f'    size_t n{i} = (bytes{i} + 1u) / 2u;')
+   v.append(f'        if (!p->counts[{i}] || ((unsigned char *)(p->data + ({offset})))[0] > 127u || p->counts[{i}] != (((unsigned char *)(p->data + ({offset})))[0] + 2u) / 2u) return 0;')
+  elif direction=='t':
+   c.append(f'    int n{i} = (128 + 1) / 2;')
+   v.append(f'        if (p->counts[{i}] != (128 + 1) / 2) return 0;')
+  elif direction=='g':
+   c.append(f'    int n{i} = ({count} == SHEL_BUFSIZE) ? 0 : ({count} + 1) / 2;')
+   v.append(f'        if (({expr}) == SHEL_BUFSIZE ? p->counts[{i}] != 0 : (({expr}) < 0 || p->counts[{i}] != (({expr}) + 1) / 2)) return 0;')
   else:
    c.append(f'    int n{i} = '+ (f'({count}+1)/2;' if direction in ['b','j'] else f'{count};'))
    v.append(f'        if (({expr}) < 0 || p->counts[{i}] != '+(f'(({expr})+1)/2' if direction in ['b','j'] else f'({expr})')+') return 0;')
-  c.append(f'    if (n{i} < 0 || (size_t)n{i} > GEM_AES_WORDS-used) '+('return;' if ret=='VOID' else 'return 0;')) if direction!='s' else c.append(f'    if (n{i} > GEM_AES_WORDS-used) '+('return;' if ret=='VOID' else 'return 0;'))
+  c.append(f'    if (n{i} < 0 || (size_t)n{i} > GEM_AES_WORDS-used) '+('return;' if ret=='VOID' else 'return 0;')) if direction not in ['s','u'] else c.append(f'    if (n{i} > GEM_AES_WORDS-used) '+('return;' if ret=='VOID' else 'return 0;'))
   c.append(f'    packet.counts[{i}] = (uint16_t)n{i};')
-  if direction in ['i','s','j']:
-   size=f'strlen((const char *){pname})+1' if direction=='s' else (count if direction=='j' else f'(size_t)n{i}*2')
+  if direction in ['i','s','j','u']:
+   size=f'strlen((const char *){pname})+1' if direction=='s' else (f'bytes{i}' if direction=='u' else (count if direction=='j' else f'(size_t)n{i}*2'))
    c.append(f'    if ({pname}) memcpy(packet.data+used, {pname}, {size});')
   d.append(f'        void *arg{i} = p->data + ({offset});')
   offsets.append(f'p->counts[{i}]')
   call.append(f'arg{i}')
-  if direction in ['o','b']:
-   size = 'strlen((const char *)(packet.data+used))+1' if name in ['shel_read','shel_rdef'] else (count if direction=='b' else f'(size_t)n{i}*2')
+  if direction in ['o','b','t','g']:
+   if direction=='t': size = '(size_t)(unsigned char)packet.data[used]+1u'
+   elif direction=='g': size = f'(size_t)packet.args[{i}]'
+   else: size = 'strlen((const char *)(packet.data+used))+1' if name in ['shel_read','shel_rdef'] else (count if direction=='b' else f'(size_t)n{i}*2')
    copy.append(f'    if ({pname}) memcpy({pname}, packet.data+used, {size});')
   copy.append(f'    used += packet.counts[{i}];')
   c.append(f'    used += (size_t)n{i};')
@@ -103,7 +115,13 @@ for ret,name,params in functions:
  c += ['    (void)used;', '    if (!gem_rpc_call(GEM_RPC_AES_EXT, &packet, sizeof(packet),', '            &result, &packet, sizeof(packet))) '+('return;' if ret=='VOID' else 'return 0;'),'    used = 0;']+copy+['    (void)used;']
  if ret=='WORD':c+=['    return (WORD)result;']
  c+=['}'];client.append('\n'.join(c))
- d += ['        '+('return ' if ret=='WORD' else '')+name+'('+', '.join(call)+');']
+ if name == 'shel_get':
+  d += ['        WORD available = shel_get(NULL, SHEL_BUFSIZE);',
+        '        if (p->args[1] == SHEL_BUFSIZE) return available;',
+        '        p->args[0] = p->args[1] < available ? p->args[1] : available;',
+        '        return shel_get('+', '.join(call)+');']
+ else:
+  d += ['        '+('return ' if ret=='WORD' else '')+name+'('+', '.join(call)+');']
  if ret=='VOID':d+=['        return 1;']
  d+=['    }'];server+= '\n'.join(d)+'\n'
  v+=['        return 1;'];valid+='\n'.join(v)+'\n'

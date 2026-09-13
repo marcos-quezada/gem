@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Own one F5 Rasta/gemd session and launch every sample, desktop first.
+"""Own one F5 Rasta/gemd session and launch selected GEM applications.
 
 MIT License (see LICENSE). Copyright (C) 2026 tomaz stih.
 """
@@ -20,7 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = Path(os.environ.get('GEM_RUNTIME_ROOT', str(ROOT/'bin'))).resolve()
 SESSION = ROOT / 'build/f5'
 STATE = SESSION / 'state.json'
-APPS = ('desktop', 'calc', 'clock', 'gemscape', 'maestro', 'terminal', 'stout')
+BUNDLED_APPS = ('desktop', 'calc', 'clock', 'terminal')
+SAMPLE_APPS = ('gemscape', 'maestro', 'stout')
+ALL_APPS = BUNDLED_APPS + SAMPLE_APPS
+INITIAL_APPS = ('desktop', 'terminal')
+
+
+def application_path(name):
+    directory = 'apps' if name in BUNDLED_APPS else 'samples'
+    return RUNTIME / directory / name
 
 
 def identity(pid):
@@ -86,9 +94,10 @@ def stop():
 
 
 class Session:
-    def __init__(self, own_server=False, duration=None):
+    def __init__(self, own_server=False, duration=None, apps=INITIAL_APPS):
         self.own_server = own_server
         self.duration = duration
+        self.apps = apps
         self.running = True
         self.processes = []
         self.logs = []
@@ -140,10 +149,13 @@ class Session:
             time.sleep(.05)
 
     def run(self):
-        discovered = {p.name for p in (ROOT/'samples/src').iterdir()
-                      if p.is_dir() and (p/'CMakeLists.txt').exists()}
-        if discovered != set(APPS) | {'msa'}:
-            raise RuntimeError('Update the session launcher for the changed samples inventory')
+        bundled = {p.name for p in (ROOT/'src/apps').iterdir()
+                   if p.is_dir() and (p/'CMakeLists.txt').exists()}
+        samples = {p.name for p in (ROOT/'samples/src').iterdir()
+                   if p.is_dir() and (p/'CMakeLists.txt').exists()}
+        if bundled != {'desktop', 'calculator', 'clock', 'terminal'} or \
+                samples != set(SAMPLE_APPS) | {'msa'}:
+            raise RuntimeError('Update the session launcher for the changed application inventory')
         SESSION.mkdir(parents=True, exist_ok=True)
         SESSION.chmod(0o700)
         sock = SESSION / 'socket'
@@ -173,8 +185,9 @@ class Session:
         self.publish('viewer-ready')
         if self.own_server:
             sys.path.insert(0, str(ROOT/'tests/integration/session'))
-            from interaction import Interaction
-            self.interaction = Interaction(self, SESSION)
+            if self.apps == ALL_APPS:
+                from interaction import Interaction
+                self.interaction = Interaction(self, SESSION)
             self.start_process('gemd', [str(RUNTIME/'core/gemd')])
         self.wait(sock.exists, 'debugger to start gemd', 60)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
@@ -186,7 +199,7 @@ class Session:
             self.state['processes'].append({'name': 'gemd', 'pid': pid, 'birth': identity(pid),
                                            'group': False, 'required': True})
             self.publish()
-        desktop = self.start_process('desktop', [str(RUNTIME/'samples/desktop')])
+        desktop = self.start_process('desktop', [str(application_path('desktop'))])
         def rendered():
             path = SESSION/'framebuffer'
             return path.exists() and len(set(path.read_bytes())) > 8
@@ -197,17 +210,25 @@ class Session:
         if self.interaction:
             self.interaction.snapshot('desktop_ready')
         self.publish('desktop-ready')
-        guest = SESSION/'guest'
-        guest.mkdir(exist_ok=True)
-        msa = self.start_process('msa', [str(RUNTIME/'samples/msa'), 'extract',
-                                str(ROOT/'samples/data/st.msa'), str(guest)], required=False)
-        if msa.wait(timeout=10) != 0:
-            raise RuntimeError('MSA extraction failed; see msa.log')
-        program = next((p for p in guest.rglob('*') if p.name.upper() == 'DEMO.PRG'), None)
-        if program is None:
-            raise RuntimeError('Bundled MSA image did not contain DEMO.PRG')
-        for name in APPS[1:]:
-            command = [str(RUNTIME/'samples'/name)]
+        msa = None
+        program = None
+        if 'stout' in self.apps:
+            guest = SESSION/'guest'
+            guest.mkdir(exist_ok=True)
+            msa = self.start_process(
+                'msa', [str(RUNTIME/'samples/msa'), 'extract',
+                        str(ROOT/'samples/data/st.msa'), str(guest)],
+                required=False)
+            if msa.wait(timeout=10) != 0:
+                raise RuntimeError('MSA extraction failed; see msa.log')
+            program = next((p for p in guest.rglob('*')
+                            if p.name.upper() == 'DEMO.PRG'), None)
+            if program is None:
+                raise RuntimeError('Bundled MSA image did not contain DEMO.PRG')
+        for name in self.apps:
+            if name == 'desktop':
+                continue
+            command = [str(application_path(name))]
             if name == 'stout':
                 command.append(str(program))
             proc = self.start_process(name, command)
@@ -225,16 +246,21 @@ class Session:
         self.pause(1)
         for proc in self.processes:
             if proc is not msa and proc.poll() is not None:
-                raise RuntimeError(f'Sample exited during startup: {proc.args}')
-        (SESSION/'all_samples.pbm').write_bytes(b'P4\n1024 768\n' + (SESSION/'framebuffer').read_bytes())
-        self.state['all_samples_started'] = True
-        self.publish('all-samples-ready')
+                raise RuntimeError(f'Application exited during startup: {proc.args}')
+        capture_name = ('all_samples.pbm' if self.apps == ALL_APPS
+                        else 'applications.pbm')
+        (SESSION/capture_name).write_bytes(
+            b'P4\n1024 768\n' + (SESSION/'framebuffer').read_bytes())
+        self.state['started_apps'] = list(self.apps)
+        self.state['all_samples_started'] = self.apps == ALL_APPS
+        self.publish('all-samples-ready' if self.apps == ALL_APPS
+                     else 'applications-ready')
         deadline = time.monotonic() + self.duration if self.duration is not None else float('inf')
         while self.running and viewer.poll() is None and desktop.poll() is None and time.monotonic() < deadline:
             if self.duration is not None:
                 for proc in self.processes:
                     if proc is not msa and proc.poll() is not None:
-                        raise RuntimeError(f'Sample exited during validation: {proc.args}')
+                        raise RuntimeError(f'Application exited during validation: {proc.args}')
             self.pause(.2)
         if self.interaction and self.running:
             self.interaction.check()
@@ -269,6 +295,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('start', 'stop', 'supervise', 'check'))
     parser.add_argument('--directory', type=Path, default=SESSION)
+    parser.add_argument('--apps', default=None,
+                        help='comma-separated applications to launch')
     args = parser.parse_args()
     SESSION = args.directory.resolve()
     STATE = SESSION/'state.json'
@@ -279,13 +307,17 @@ def main():
     if args.action == 'start':
         stop()
         with (SESSION/'session.log').open('w') as log:
-            proc = subprocess.Popen([sys.executable, '-B', __file__, 'supervise', '--directory', str(SESSION)],
-                stdout=log, stderr=log, start_new_session=True)
+            command = [sys.executable, '-B', __file__, 'supervise',
+                       '--directory', str(SESSION), '--apps',
+                       ','.join(INITIAL_APPS)]
+            proc = subprocess.Popen(command, stdout=log, stderr=log,
+                                    start_new_session=True)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and proc.poll() is None:
             state = read_state()
             if state.get('manager', {}).get('pid') == proc.pid and state.get('phase') == 'viewer-ready':
-                print(f'Rasta ready. F5 will start gemd, desktop, then all samples. Logs: {SESSION}')
+                print('Rasta ready. F5 will start gemd, Desktop and Terminal. '
+                      f'Logs: {SESSION}')
                 return
             time.sleep(.05)
         if proc.poll() is None:
@@ -294,7 +326,16 @@ def main():
         raise RuntimeError(f'Session preparation failed; see {SESSION}/session.log')
     if args.action == 'check':
         stop()
-    session = Session(own_server=args.action == 'check', duration=3 if args.action == 'check' else None)
+    if args.apps is None:
+        apps = ALL_APPS if args.action == 'check' else INITIAL_APPS
+    else:
+        apps = tuple(name for name in args.apps.split(',') if name)
+        unknown = set(apps) - set(ALL_APPS)
+        if unknown or 'desktop' not in apps:
+            parser.error('apps must include desktop and use known application names')
+    session = Session(own_server=args.action == 'check',
+                      duration=3 if args.action == 'check' else None,
+                      apps=apps)
     try:
         session.run()
     except InterruptedError:

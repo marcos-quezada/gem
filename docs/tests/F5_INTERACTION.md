@@ -20,7 +20,7 @@ live application when no active application or menu owner exists.
 
 ## Executed checks
 
-The updated `test_sample_session` starts Rasta, gemd, desktop and all samples,
+The updated `test_sample_session` starts Rasta, gemd and all applications,
 including the extracted MSA guest in Stout. It injects real Rasta HID packets
 and queries window geometry through an independent GEM RPC connection with a
 two-second reply timeout.
@@ -47,7 +47,7 @@ input and observable outcome checks rather than relying on live processes.
 
 The session test also captures the initial desktop, locates Workspace from
 its bitmap asset, moves Stout to expose the left edge of the Workspace label,
-and double-clicks that label while Terminal and all other samples remain
+and double-clicks that label while Terminal and all other applications remain
 running. Independent window queries verify that the file manager opens and
 closes. Evidence includes `desktop_ready.pbm`, `workspace_before.pbm` and
 `workspace_open.pbm` in `build/sample_session_test/`.
@@ -55,5 +55,5 @@ closes. Evidence includes `desktop_ready.pbm`, `workspace_before.pbm` and
 The F5 check also leaves Desk open for three seconds with a partial RPC frame
 pending, then selects Desktop info above a window closer and keeps the alert
 open seven seconds. The client connection, window geometries and all sample
-processes must survive. See [the Desktop info regression](DESKTOP.md) for the
+application processes must survive. See [the Desktop info regression](DESKTOP.md) for the
 reproduced disconnect and timeout-accounting fix.

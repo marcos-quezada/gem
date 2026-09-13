@@ -17,8 +17,11 @@ behavior is implemented. See the [audit](../tests/SECURITY_AUDIT.md) and
 - Add focused acceptance for Clock numerals, Gemscape toolbar and Maestro tree
   resource rendering. Their startup is covered in the combined session; it is
   not exhaustive visual coverage. Clock's proxy path still uses text numerals.
-- Split large AES window/menu modules and the desktop implementation along
-  ownership boundaries, with behavior tests protecting the public API.
+- Every owned source now sits near the 500-line guidance except the
+  public API headers, whose per-function documentation defines the SDK, and
+  `tests/uat/demo31/main.c`, a deliberately self-contained acceptance demo
+  that diverged from the Terminal application. Fold demo31 onto the Terminal
+  modules only if its distinct timings become part of a scenario.
 - Profile dirty-region merging and RPC batch sizes before further drawing
   optimizations. Preserve GEM update locking, write modes and clipping.
 - Establish a reviewed dependency-update procedure for Rasta, Musashi and the

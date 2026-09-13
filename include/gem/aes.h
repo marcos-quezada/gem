@@ -200,6 +200,7 @@ extern "C" {
 #define AC_OPEN 40  /* Accessory open message. */
 #define AC_CLOSE 41 /* Accessory close message. */
 #define AC_ABORT 42 /* Accessory abort message. */
+#define AP_TERM 50  /* Application terminate request. */
 
 #define CT_UPDATE 50 /* Control-manager update message. */
 #define CT_MOVE 51   /* Control-manager move message. */
@@ -254,9 +255,12 @@ extern "C" {
 /*
  * Window field selectors.
  */
-#define WF_KIND 1       /* Window kind bit mask. */
-#define WF_NAME 2       /* Window title string. */
-#define WF_INFO 3       /* Window info-line string. */
+#define WF_KIND 1 /* Window kind bit mask. */
+#define WF_NAME 2 /* Window title string. */
+#define WF_INFO 3 /* Window info-line string. */
+/* Note: Atari numbers the work area 4 and the outer frame 5; the hosted
+ * AES keeps its established numbering, and <gem.h> maps the classic names
+ * onto it. Guest loaders such as Stout translate raw Atari field numbers. */
 #define WF_WXYWH 4      /* Current outer window rectangle. */
 #define WF_CXYWH 5      /* Current work-area rectangle. */
 #define WF_PXYWH 6      /* Previous outer window rectangle. */
@@ -1300,7 +1304,8 @@ WORD graf_rubbox(WORD xorigin, WORD yorigin, WORD wmin, WORD hmin, WORD *pwend,
  *      Non-zero on success, otherwise zero.
  *
  * Notes:
- *      Often used for dragging windows or icons.
+ *      Often used for dragging windows or icons. While the button is held,
+ *      GEM displays a dotted XOR outline and erases it on release.
  *
  * Sample call:
  *      WORD dx, dy;
@@ -1646,6 +1651,9 @@ WORD wind_get(WORD handle, WORD field, WORD *w1, WORD *w2, WORD *w3, WORD *w4);
  *
  * Notes:
  *      For pointer-based strings, prefer `wind_set_str()`.
+ *      `WF_WXYWH` positions the outer frame; `WF_CXYWH` positions the
+ *      work area and derives the frame from the window kind, matching
+ *      what `wind_get()` reports for each selector.
  *
  * Sample call:
  *      wind_set(win, WF_TOP, 0, 0, 0, 0);
@@ -1825,17 +1833,18 @@ WORD rsrc_saddr(WORD type, WORD index, void *addr);
 WORD rsrc_obfix(OBJECT *tree, WORD obj);
 
 /*
- * Read the shell command tail and command path for the current launch.
+ * Read the command and TOS-format tail attached to this application launch.
  *
  * Parameters:
- *      cmd         - Receives command path.
- *      tail        - Receives command tail.
+ *      cmd         - Receives the launch command (256-byte buffer expected).
+ *      tail        - Receives a 128-byte TOS tail: length, then exact bytes.
  *
  * Returns:
  *      Non-zero on success, otherwise zero.
  *
  * Notes:
- *      Used by applications that need startup command-line context.
+ *      Each application receives its own launch pair. A process started
+ *      outside AES receives a command synthesized from its host command line.
  *
  * Sample call:
  *      char cmd[128], tail[128];
@@ -1844,38 +1853,42 @@ WORD rsrc_obfix(OBJECT *tree, WORD obj);
 WORD shel_read(char *cmd, char *tail);
 
 /*
- * Request that AES launch or switch to another application.
+ * Request that AES launch another application without stopping the caller.
  *
  * Parameters:
- *      doex        - Execute mode selector.
- *      isgr        - Graphics-mode flag.
- *      iscr        - Screen mode flag.
- *      cmd         - Command path.
- *      tail        - Command tail.
+ *      doex        - Zero is a successful no-op; one starts the program.
+ *      isgr        - Graphics-mode flag, accepted for compatibility.
+ *      isover      - Overlay flag; GEMix always starts in parallel.
+ *      cmd         - Program name or path.
+ *      tail        - TOS tail: length byte followed by exact argument bytes.
  *
  * Returns:
  *      Non-zero on success, otherwise zero.
  *
  * Notes:
- *      Semantics vary across GEM versions and multitasking setups.
+ *      The executable is resolved through the OS abstraction. The child gets
+ *      a reserved AES id and private launch metadata before it executes.
  *
  * Sample call:
  *      shel_write(1, 1, 0, cmd, tail);
  */
-WORD shel_write(WORD doex, WORD isgr, WORD iscr, char *cmd, char *tail);
+WORD shel_write(WORD doex, WORD isgr, WORD isover, char *cmd, char *tail);
+
+/* Query selector for `shel_get`: return the stored byte count without copy. */
+#define SHEL_BUFSIZE ((WORD)-1)
 
 /*
- * Read bytes from the AES shell buffer.
+ * Read bytes from the one AES-global shell buffer.
  *
  * Parameters:
  *      buf         - Destination buffer.
- *      length      - Number of bytes to read.
+ *      length      - Maximum bytes to read, or SHEL_BUFSIZE to query size.
  *
  * Returns:
- *      Non-zero on success, otherwise zero.
+ *      Non-zero on success; a size query returns the stored byte count.
  *
  * Notes:
- *      This is a low-level shell buffer accessor.
+ *      Copies no more than the currently stored byte count.
  *
  * Sample call:
  *      shel_get(buf, sizeof(buf));
@@ -1883,7 +1896,7 @@ WORD shel_write(WORD doex, WORD isgr, WORD iscr, char *cmd, char *tail);
 WORD shel_get(char *buf, WORD length);
 
 /*
- * Write bytes to the AES shell buffer.
+ * Replace the bytes in the one AES-global shell buffer.
  *
  * Parameters:
  *      buf         - Source buffer.
@@ -1893,7 +1906,8 @@ WORD shel_get(char *buf, WORD length);
  *      Non-zero on success, otherwise zero.
  *
  * Notes:
- *      This is a low-level shell buffer accessor.
+ *      The hosted implementation accepts up to 32767 bytes. The buffer is
+ *      mutex-protected and is unrelated to application INF files.
  *
  * Sample call:
  *      shel_put(buf, len);
@@ -1901,16 +1915,17 @@ WORD shel_get(char *buf, WORD length);
 WORD shel_put(char *buf, WORD length);
 
 /*
- * Resolve an executable path using the AES shell search rules.
+ * Resolve a file path using the AES shell search rules.
  *
  * Parameters:
- *      path        - In/out executable path string.
+ *      path        - In/out file-name buffer (260 bytes expected).
  *
  * Returns:
  *      Non-zero on success, otherwise zero.
  *
  * Notes:
- *      AES may rewrite the path buffer with a resolved location.
+ *      Searches the current directory, GEMIX_HOME, GEMIX_HOME/apps, PATH and
+ *      the optional GEM_AES_PATH, in that order. Success writes a full path.
  *
  * Sample call:
  *      shel_find(path);
@@ -1928,7 +1943,8 @@ WORD shel_find(char *path);
  *      Non-zero on success, otherwise zero.
  *
  * Notes:
- *      The returned pointer typically refers into the environment block.
+ *      A trailing '=' in var is accepted. The returned pointer is owned by
+ *      the platform OS layer and must not be freed or modified.
  *
  * Sample call:
  *      char *value;

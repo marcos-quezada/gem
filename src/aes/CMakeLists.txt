@@ -1,14 +1,33 @@
 add_library(aes SHARED
+    system_menu.c
     alert_icons.c
     aes_core.c
+    aes_shel.c
+    aes_files.c
+    aes_geometry.c
     menu_internal.c
-    window_internal.c
+    menu_layout.c
+    menu_track.c
+    window_geometry.c
+    window_redraw.c
+    window_chrome.c
+    paint.c
+    object_parts.c
+    object_draw.c
     aes.c
     event.c
+    window_track.c
+    window_drag.c
     file_selector.c
+    fsel_paths.c
+    fsel_draw.c
     menu.c
+    alert.c
+    form.c
+    form_edit.c
     resource.c
     window.c
+    window_visible.c
 )
 
 target_include_directories(aes

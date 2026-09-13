@@ -126,9 +126,14 @@ Still worth tightening:
 
 - `scrp_read()`, `scrp_write()`, and `scrp_clear()` should behave like a
   stable GEM clipboard path contract, not just a hosted convenience.
-- `shel_*` calls should return values and persist defaults in a way that
-  old applications can rely on.
-- `shel_find()` should be predictable for GEM-style file lookup.
+- Decide whether `shel_rdef()`/`shel_wdef()` defaults need persistence beyond
+  the current AES session for compatibility with specific old applications.
+
+The core multitasking behavior is implemented: `shel_put()`/`shel_get()` use
+one synchronized global blob, while each parallel `shel_write()` child receives
+its own application id, command and TOS tail. File search follows the documented
+GEMix path order and all host process, environment and file probes are isolated
+behind the platform OS layer.
 
 Useful for completeness, but not the first place to spend time if the
 goal is finishing 1.0 soon.

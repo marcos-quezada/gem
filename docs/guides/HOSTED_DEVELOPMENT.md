@@ -35,9 +35,10 @@ cmake --build build -j"$(nproc)"
 runtime, use `-DGEM_OUTPUT_ROOT=/absolute/path/to/build/runtime`; this keeps
 libraries and generated resources together under the root build directory.
 
-Sample applications live in `samples/src/`, including the desktop in
-`samples/src/desktop/`. Built applications are in `bin/samples/`; the display
-server remains in `bin/core/`. Automated demo scenarios remain in `tests/uat/`.
+Bundled applications live in `src/apps/`: Desktop, Terminal, Clock and
+Calculator build into `bin/apps/`. Independent examples live in `samples/src/`
+and build into `bin/samples/`; the display server remains in `bin/core/`.
+Automated demo scenarios remain in `tests/uat/`.
 
 See [independent samples](SAMPLES.md) for SDK builds and sample dependencies.
 
@@ -48,7 +49,7 @@ Start these commands in three separate terminals, in order:
 ```sh
 ./bin/tools/rasta --inverse --port 5000
 ./bin/core/gemd
-./bin/samples/desktop
+./bin/apps/desktop
 ```
 
 Wait for gemd to report that it is listening before starting the desktop.
@@ -63,24 +64,23 @@ paths and ownership requirements.
 
 ## VS Code: one F5 session
 
-Select **GEM — all samples** and press F5. This is the only launch
+Select **GEM — Desktop and Terminal** and press F5. This is the only launch
 configuration. It builds the project in GCC Debug/Rasta mode, starts Rasta,
 then launches gemd under GDB. Once gemd is listening, the supervisor starts the
 desktop and waits for its first rendered scene before launching the other apps.
 
-The session runs desktop, calculator, clock, Gemscape, Maestro, terminal and
-Stout as libgem clients on one display. The MSA command-line sample first
-extracts `samples/data/st.msa` into the session's `guest/` directory; Stout runs
-its `DEMO.PRG`. MSA completes after extraction; it has no persistent window.
-The direct `*_hosted` alternatives and numbered UAT demos are separate test
-configurations, not additional clients in this interactive session.
+The interactive session initially runs only Desktop and Terminal as libgem
+clients on one display. The full integration check explicitly launches every
+sample, including MSA extraction and Stout's `DEMO.PRG`; those applications are
+not part of normal F5 startup. The direct `*_hosted` alternatives and numbered
+UAT demos are separate test configurations.
 
 Set `RASTA_BIN` in the VS Code environment to select the viewer. The launcher
 otherwise uses the downloaded build at `bin/tools/rasta`. It uses
 a private socket, framebuffer and an available UDP port. Session data lives
-in `build/f5/`: `session.env`, `state.json`, per-process logs, `session.log`,
-the extracted guest and `all_samples.pbm`. Windows may overlap; move or raise
-them to inspect each sample. GDB breakpoints apply to gemd.
+in `build/f5/`: `session.env`, `state.json`, per-process logs, `session.log`
+and `applications.pbm`. Windows may overlap; move or raise them to inspect each
+application. GDB breakpoints apply to gemd.
 
 The Stop button terminates the session supervisor, clients and viewer. Closing
 the desktop or Rasta also ends the session. Cleanup checks process identity
@@ -93,10 +93,13 @@ startup, interaction and cleanup check independent of your interactive session:
 
 ```sh
 SDL_VIDEODRIVER=dummy python3 -B tools/scripts/sample_session.py check \
+    --apps desktop,terminal \
     --directory "$PWD/build/sample_session_check"
 ```
 
-`test_sample_session` runs this check as part of `make tests`. It verifies
+That command checks only the initial Desktop and Terminal session. The
+`test_sample_session` CTest entry deliberately omits `--apps`, launches all
+bundled and sample applications as part of the full suite, and verifies
 startup order, extraction and the Stout guest's connection. It then injects
 Rasta mouse events to drag Stout three times, move Terminal and close Terminal.
 An independent RPC client checks actual window coordinates and server

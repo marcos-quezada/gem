@@ -101,6 +101,12 @@ int vdi_intersect_rects(const vdi_rect_t *left, const vdi_rect_t *right,
                         vdi_rect_t *out);
 int vdi_point_visible(WORD x, WORD y);
 void vdi_plot_pixel(WORD x, WORD y, WORD color);
+/* Row pointer for y, or NULL outside the surface. */
+uint8_t *vdi_screen_row_mutable(WORD y);
+/* Bit mask selecting pixel x within its packed byte. */
+uint8_t vdi_screen_mask_for_x(WORD x);
+/* Plot one pixel under the active write mode, without cursor handling. */
+void vdi_set_screen_pixel_raw(WORD x, WORD y, WORD color);
 void vdi_set_screen_pixel(WORD x, WORD y, WORD color);
 WORD vdi_get_screen_pixel(WORD x, WORD y);
 void vdi_clear_screen(WORD color);

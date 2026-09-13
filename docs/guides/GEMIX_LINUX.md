@@ -53,6 +53,14 @@ Configuration variables:
   open (default is to drop them so they do not fight absolute input).
 - `GEM_RESOURCE_DIR=/opt/gemix/share/gem` overrides resource discovery.
 
+The desktop Trash follows the freedesktop layout without requiring a desktop
+environment. It uses `$XDG_DATA_HOME/Trash` when `XDG_DATA_HOME` is an absolute
+path, otherwise `$HOME/.local/share/Trash`; items on another filesystem use
+`$mount/.Trash-$UID`. If that per-volume store cannot be created, Desktop falls
+back to the home Trash. The platform move wrapper uses `rename()` on one
+filesystem and a no-follow copy/remove transaction across filesystems, so this
+fallback also works for non-empty directory trees and symbolic links.
+
 The framebuffer presenter accepts 1, 8, 16, 24, and 32 bits per pixel.
 VDI remains monochrome and uses the **same shadow packing as rasta**.
 Only the Linux present step converts that buffer to fbdev pixels

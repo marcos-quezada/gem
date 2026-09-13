@@ -57,7 +57,7 @@ WORD shel_read(char *cmd, char *tail)
         return 0;
     packet.counts[0] = (uint16_t)n0;
     used += (size_t)n0;
-    int n1 = (260 + 1) / 2;
+    int n1 = (128 + 1) / 2;
     if (n1 < 0 || (size_t)n1 > GEM_AES_WORDS - used)
         return 0;
     packet.counts[1] = (uint16_t)n1;
@@ -73,20 +73,20 @@ WORD shel_read(char *cmd, char *tail)
     used += packet.counts[0];
     if (tail)
         memcpy(tail, packet.data + used,
-               strlen((const char *)(packet.data + used)) + 1);
+               (size_t)(unsigned char)packet.data[used] + 1u);
     used += packet.counts[1];
     (void)used;
     return (WORD)result;
 }
 
-WORD shel_write(WORD doex, WORD isgr, WORD iscr, char *cmd, char *tail)
+WORD shel_write(WORD doex, WORD isgr, WORD isover, char *cmd, char *tail)
 {
     gem_aes_packet_t packet = {.handle = 0, .function = rpc_shel_write};
     int32_t result = 0;
     size_t used = 0;
     packet.args[0] = doex;
     packet.args[1] = isgr;
-    packet.args[2] = iscr;
+    packet.args[2] = isover;
     size_t n3 = cmd ? strlen((const char *)cmd) + 1 : 1;
     n3 = (n3 + 1) / 2;
     if (n3 > GEM_AES_WORDS - used)
@@ -95,13 +95,13 @@ WORD shel_write(WORD doex, WORD isgr, WORD iscr, char *cmd, char *tail)
     if (cmd)
         memcpy(packet.data + used, cmd, strlen((const char *)cmd) + 1);
     used += (size_t)n3;
-    size_t n4 = tail ? strlen((const char *)tail) + 1 : 1;
-    n4 = (n4 + 1) / 2;
+    size_t bytes4 = tail ? (unsigned char)tail[0] + 1u : 1u;
+    size_t n4 = (bytes4 + 1u) / 2u;
     if (n4 > GEM_AES_WORDS - used)
         return 0;
     packet.counts[4] = (uint16_t)n4;
     if (tail)
-        memcpy(packet.data + used, tail, strlen((const char *)tail) + 1);
+        memcpy(packet.data + used, tail, bytes4);
     used += (size_t)n4;
     (void)used;
     if (!gem_rpc_call(GEM_RPC_AES_EXT, &packet, sizeof(packet), &result,
@@ -119,7 +119,7 @@ WORD shel_get(char *buf, WORD length)
     gem_aes_packet_t packet = {.handle = 0, .function = rpc_shel_get};
     int32_t result = 0;
     size_t used = 0;
-    int n0 = (length + 1) / 2;
+    int n0 = (length == SHEL_BUFSIZE) ? 0 : (length + 1) / 2;
     if (n0 < 0 || (size_t)n0 > GEM_AES_WORDS - used)
         return 0;
     packet.counts[0] = (uint16_t)n0;
@@ -131,7 +131,7 @@ WORD shel_get(char *buf, WORD length)
         return 0;
     used = 0;
     if (buf)
-        memcpy(buf, packet.data + used, length);
+        memcpy(buf, packet.data + used, (size_t)packet.args[0]);
     used += packet.counts[0];
     (void)used;
     return (WORD)result;

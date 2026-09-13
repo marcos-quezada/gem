@@ -10,6 +10,10 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "rasta_internal.h"
+
+#include <stdio.h>
+
 #include "platform/raster.h"
 
 #include <errno.h>
@@ -31,7 +35,6 @@ static size_t g_framebuffer_size;
 static dev_t g_framebuffer_dev;
 static ino_t g_framebuffer_ino;
 
-static const char *rasta_framebuffer_path(void);
 static size_t rasta_row_bytes(uint16_t width);
 static size_t rasta_file_size(uint16_t width, uint16_t height);
 static int ensure_framebuffer_target(void);
@@ -131,22 +134,6 @@ static int reopen_framebuffer_target(size_t size)
     }
 
     return 1;
-}
-
-static const char *rasta_framebuffer_path(void)
-{
-    const char *value = getenv("GEM_RASTA_FRAMEBUFFER");
-
-    if (value != NULL && value[0] != '\0') {
-        return value;
-    }
-
-    value = getenv("RASTA_FRAMEBUFFER");
-    if (value != NULL && value[0] != '\0') {
-        return value;
-    }
-
-    return "/tmp/rasta.fb";
 }
 
 static size_t rasta_row_bytes(uint16_t width)
@@ -292,6 +279,19 @@ void gem_raster_present(void)
         return;
     }
     memcpy(g_present_pixels, g_surface.pixels, g_framebuffer_size);
+}
+
+void gem_raster_clear(void)
+{
+    if (g_framebuffer_size == 0u) {
+        return;
+    }
+    if (g_surface.pixels != NULL) {
+        memset(g_surface.pixels, 0, g_framebuffer_size);
+    }
+    if (g_present_pixels != NULL) {
+        memset(g_present_pixels, 0, g_framebuffer_size);
+    }
 }
 
 void gem_raster_present_rect(int x, int y, int width, int height)

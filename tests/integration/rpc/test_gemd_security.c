@@ -458,6 +458,99 @@ static uint32_t menu_hash(void)
     return hash;
 }
 
+/* Drain an application's message queue; returns the last WM_REDRAW rect
+ * for handle in out (x, y, w, h) and nonzero when one arrived. */
+static int drain_redraw(int fd, WORD handle, WORD out[4])
+{
+    int found = 0;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        gem_rpc_words8_t message;
+        struct timespec pause = {0, 25000000};
+        send_request(fd, GEM_RPC_EVNT_MESAG, NULL, 0);
+        if (receive_reply(fd, &message, sizeof(message)) == 1) {
+            if (message.values[0] == WM_REDRAW && message.values[3] == handle) {
+                memcpy(out, &message.values[4], 4 * sizeof(WORD));
+                found = 1;
+            }
+            attempt = 0;
+            continue;
+        }
+        if (found)
+            break;
+        nanosleep(&pause, NULL);
+    }
+    return found;
+}
+
+/* The top window's application owns the menu bar: a menu-less window
+ * raised by wind_open or WF_TOP shows an empty strip rather than another
+ * application's titles, and a window that closes just before its
+ * application exits still leaves the exposed application a WM_REDRAW to
+ * repaint what it uncovered. */
+static void focus_and_exposure(int a, int b, int c, WORD a_window,
+                               WORD b_window, WORD c_window)
+{
+    gem_rpc_menu_bar_req_t req = menu();
+    gem_rpc_wind_create_req_t create = {NAME | CLOSER | MOVER, 400, 90, 100,
+                                        100};
+    gem_rpc_wind_open_req_t open = {0, 400, 90, 100, 100};
+    gem_rpc_wind_set_req_t top = {c_window, WF_TOP, 0, 0, 0, 0};
+    gem_rpc_handle_req_t handle;
+    WORD rect[4];
+    uint32_t owner_menu, third_menu, empty_bar;
+    int d;
+
+    top.handle = a_window;
+    assert(call(a, GEM_RPC_WIND_SET, &top, sizeof(top)) == 1);
+    owner_menu = menu_hash();
+    top.handle = c_window;
+    strcpy(req.strings[0].text, "Third");
+    assert(call(c, GEM_RPC_MENU_BAR, &req, sizeof(req)) == 1);
+    third_menu = menu_hash();
+    assert(third_menu != owner_menu);
+    open.handle = (WORD)call(b, GEM_RPC_WIND_CREATE, &create, sizeof(create));
+    assert(open.handle > 0);
+    assert(call(b, GEM_RPC_WIND_OPEN, &open, sizeof(open)) == 1);
+    empty_bar = menu_hash();
+    assert(empty_bar != owner_menu && empty_bar != third_menu);
+    assert(call(c, GEM_RPC_WIND_SET, &top, sizeof(top)) == 1);
+    assert(menu_hash() == third_menu);
+    top.handle = open.handle;
+    assert(call(b, GEM_RPC_WIND_SET, &top, sizeof(top)) == 1);
+    assert(menu_hash() == empty_bar);
+    top.handle = a_window;
+    assert(call(a, GEM_RPC_WIND_SET, &top, sizeof(top)) == 1);
+    assert(menu_hash() == owner_menu);
+    /* The strip stays reserved: the desktop still starts below it. */
+    {
+        gem_rpc_wind_get_req_t get = {0, WF_WXYWH};
+        gem_rpc_wind_get_rsp_t reply;
+        send_request(b, GEM_RPC_WIND_GET, &get, sizeof(get));
+        assert(receive_reply(b, &reply, sizeof(reply)) == 1 && reply.w2 > 0);
+    }
+    handle.handle = open.handle;
+    assert(call(b, GEM_RPC_WIND_CLOSE, &handle, sizeof(handle)) == 1);
+    assert(call(b, GEM_RPC_WIND_DELETE, &handle, sizeof(handle)) == 1);
+
+    /* Exposure: a fresh application covers b's window, closes and exits. */
+    (void)drain_redraw(b, b_window, rect);
+    d = connect_peer();
+    (void)start(d);
+    create.x = open.x = 250;
+    open.handle = (WORD)call(d, GEM_RPC_WIND_CREATE, &create, sizeof(create));
+    assert(open.handle > 0 && call(d, GEM_RPC_WIND_OPEN, &open, sizeof(open)));
+    (void)drain_redraw(b, b_window, rect);
+    handle.handle = open.handle;
+    assert(call(d, GEM_RPC_WIND_CLOSE, &handle, sizeof(handle)) == 1);
+    assert(call(d, GEM_RPC_WIND_DELETE, &handle, sizeof(handle)) == 1);
+    assert(call(d, GEM_RPC_APPL_EXIT, NULL, 0) == 1);
+    close(d);
+    assert(drain_redraw(b, b_window, rect));
+    assert(rect[0] <= 250 && rect[1] <= 90 && rect[0] + rect[2] >= 350 &&
+           rect[1] + rect[3] >= 190);
+    puts("menu follows raised windows; exposure survives the closer's exit");
+}
+
 static void menu_lifetimes(int a, int b, int c)
 {
     gem_rpc_menu_bar_req_t req = menu(), hide = {0};
@@ -477,6 +570,33 @@ static void menu_lifetimes(int a, int b, int c)
     assert(active != menu_hash());
     puts("inactive menu removal and desktop/active-owner exit preserve the "
          "survivor");
+}
+
+/* An exclusive VDI-only session must stop refusing appl_init once its
+ * connection is gone, even though its slot is not reused straight away. */
+static void standalone_release(void)
+{
+    int exclusive = connect_peer(), waiting;
+    int32_t granted = 0, id = 0;
+    struct timespec pause = {0, 10000000};
+    assert(call(exclusive, GEM_RPC_APPL_INIT, NULL, 0) > 0);
+    for (int i = 0; i < 100 && !granted; ++i) {
+        granted = call(exclusive, GEM_RPC_VDI_STANDALONE, NULL, 0);
+        if (!granted)
+            nanosleep(&pause, NULL);
+    }
+    assert(granted == 1);
+    waiting = connect_peer();
+    assert(call(waiting, GEM_RPC_APPL_INIT, NULL, 0) == 0);
+    close(exclusive);
+    for (int i = 0; i < 100 && id <= 0; ++i) {
+        id = call(waiting, GEM_RPC_APPL_INIT, NULL, 0);
+        if (id <= 0)
+            nanosleep(&pause, NULL);
+    }
+    assert(id > 0);
+    close(waiting);
+    puts("exclusive session release restores application admission");
 }
 
 int main(void)
@@ -504,8 +624,10 @@ int main(void)
     timers(a, b);
     locks(b);
     modal_waits(b);
+    focus_and_exposure(a, b, c, a_window, b_window, c_window);
     menu_lifetimes(a, b, c);
     close(b);
+    standalone_release();
     close(input_fd);
     puts("GEM security/multi-application regressions passed");
     return 0;

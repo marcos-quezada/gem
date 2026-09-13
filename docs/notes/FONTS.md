@@ -162,8 +162,9 @@ raw bytes directly onto in-memory structs.
 
 ## Current implementation
 
-The loader, font registry and glyph renderer are in
-[src/vdi/fonts.c](../../src/vdi/fonts.c). Bundled `.fnt` files live in
+The loader and font registry are in
+[src/vdi/fonts.c](../../src/vdi/fonts.c); metrics and glyph rendering are in
+[src/vdi/glyphs.c](../../src/vdi/glyphs.c). Bundled `.fnt` files live in
 `src/resources/fonts/`; the build copies them to `bin/resources/fonts/`, and
 `make sdk` exports them under `bin/sdk/share/gem/fonts/`.
 

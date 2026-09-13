@@ -1,5 +1,6 @@
 add_executable(msa_cli
     cli.c
+    extract.c
 )
 
 set_target_properties(msa_cli PROPERTIES

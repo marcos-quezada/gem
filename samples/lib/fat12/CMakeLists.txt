@@ -1,5 +1,6 @@
 add_library(fat12 SHARED
     fat12.c
+    fat12_dir.c
 )
 
 set_target_properties(fat12 PROPERTIES

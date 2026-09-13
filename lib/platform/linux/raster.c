@@ -104,7 +104,9 @@ int gem_raster_init(uint16_t width, uint16_t height, gem_raster_format_t format)
     size_t pitch;
     size_t shadow_size;
 
-    if (width == 0u || height == 0u || format != GEM_RASTER_MONO1) {
+    /* Zero width/height is the documented "fill the framebuffer" request
+     * and is resolved once the device geometry is known below. */
+    if (format != GEM_RASTER_MONO1) {
         errno = EINVAL;
         return 0;
     }
@@ -359,6 +361,16 @@ void gem_raster_present(void)
         return;
     }
     gem_raster_present_rect(0, 0, (int)g_surface.width, (int)g_surface.height);
+}
+
+void gem_raster_clear(void)
+{
+    if (g_surface.pixels != NULL && g_framebuffer_size != 0u) {
+        memset(g_surface.pixels, 0, g_framebuffer_size);
+    }
+    if (g_framebuffer != NULL && g_framebuffer_size != 0u) {
+        memset(g_framebuffer, 0, g_framebuffer_size);
+    }
 }
 
 void gem_raster_set_palette(uint8_t index, uint8_t red, uint8_t green,

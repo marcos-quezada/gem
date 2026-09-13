@@ -7,10 +7,7 @@
  */
 #include "gem_protocol.h"
 #include "platform/os.h"
-#include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 WORD evnt_keybd(void)
 {
     WORD key = 0;
@@ -123,31 +120,5 @@ WORD objc_order(OBJECT *tree, WORD object, WORD position)
         tree[parent].ob_head = object;
     else
         tree[previous].ob_next = object;
-    return 1;
-}
-WORD shel_envrn(char **env, char *var)
-{
-    if (!env || !var)
-        return 0;
-    char *value = getenv(var);
-    if (!value)
-        return 0;
-    *env = value;
-    return 1;
-}
-WORD shel_find(char *path)
-{
-    char resolved[260];
-    const char *resources = getenv("GEM_RESOURCE_DIR");
-    if (!path)
-        return 0;
-    if (access(path, R_OK) == 0)
-        return 1;
-    if (!resources)
-        resources = "bin/resources";
-    int length = snprintf(resolved, sizeof(resolved), "%s/%s", resources, path);
-    if (length < 0 || length >= (int)sizeof(resolved) || access(resolved, R_OK))
-        return 0;
-    strcpy(path, resolved);
     return 1;
 }

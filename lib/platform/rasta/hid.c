@@ -8,6 +8,8 @@
  * Copyright (C) 2026 tomaz stih
  */
 
+#include "rasta_internal.h"
+
 #include "platform/hid.h"
 #include "platform/raster.h"
 
@@ -42,13 +44,6 @@ struct rasta_input_message {
     int16_t par2;
 };
 
-enum {
-    rasta_mod_rshift = 0x0001,
-    rasta_mod_lshift = 0x0002,
-    rasta_mod_ctrl = 0x0004,
-    rasta_mod_alt = 0x0008
-};
-
 static int g_socket_fd = -1;
 static int16_t g_mouse_x;
 static int16_t g_mouse_y;
@@ -57,10 +52,15 @@ static uint16_t g_key_mods;
 
 static void rasta_hid_trace(const char *fmt, ...)
 {
-    const char *trace = getenv("GEM_TRACE_HID");
+    static int enabled = -1;
     va_list ap;
 
-    if (trace == NULL || trace[0] == '\0') {
+    if (enabled < 0) {
+        const char *trace = getenv("GEM_TRACE_HID");
+
+        enabled = trace != NULL && trace[0] != '\0';
+    }
+    if (!enabled) {
         return;
     }
 
@@ -68,215 +68,6 @@ static void rasta_hid_trace(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fputc('\n', stderr);
-}
-
-static uint16_t rasta_modifier_mask(uint16_t key)
-{
-    switch (key) {
-        case 224u:
-        case 228u:
-            return rasta_mod_ctrl;
-        case 225u:
-            return rasta_mod_lshift;
-        case 229u:
-            return rasta_mod_rshift;
-        case 226u:
-        case 230u:
-            return rasta_mod_alt;
-        default:
-            return 0u;
-    }
-}
-
-static int rasta_shift_active(uint16_t mods)
-{
-    return (mods & (rasta_mod_lshift | rasta_mod_rshift)) != 0u;
-}
-
-static uint16_t rasta_key_to_gem(uint16_t key, uint16_t mods)
-{
-    uint8_t ascii = 0u;
-    int shifted = rasta_shift_active(mods);
-
-    if (key >= 4u && key <= 29u) {
-        ascii = (uint8_t)((shifted != 0 ? 'A' : 'a') + (char)(key - 4u));
-    } else if (key >= 30u && key <= 38u) {
-        static const char unshifted_digits[] = "123456789";
-        static const char shifted_digits[] = "!@#$%^&*(";
-
-        ascii = (uint8_t)((shifted != 0 ? shifted_digits
-                                        : unshifted_digits)[key - 30u]);
-    } else {
-        switch (key) {
-            case 39u:
-                ascii = (uint8_t)((shifted != 0) ? ')' : '0');
-                break;
-            case 40u:
-                ascii = '\n';
-                break;
-            case 41u:
-                ascii = 27u;
-                break;
-            case 42u:
-                ascii = '\b';
-                break;
-            case 43u:
-                ascii = '\t';
-                break;
-            case 44u:
-                ascii = ' ';
-                break;
-            case 45u:
-                ascii = (uint8_t)((shifted != 0) ? '_' : '-');
-                break;
-            case 46u:
-                ascii = (uint8_t)((shifted != 0) ? '+' : '=');
-                break;
-            case 47u:
-                ascii = (uint8_t)((shifted != 0) ? '{' : '[');
-                break;
-            case 48u:
-                ascii = (uint8_t)((shifted != 0) ? '}' : ']');
-                break;
-            case 49u:
-                ascii = (uint8_t)((shifted != 0) ? '|' : '\\');
-                break;
-            case 51u:
-                ascii = (uint8_t)((shifted != 0) ? ':' : ';');
-                break;
-            case 52u:
-                ascii = (uint8_t)((shifted != 0) ? '"' : '\'');
-                break;
-            case 53u:
-                ascii = (uint8_t)((shifted != 0) ? '~' : '`');
-                break;
-            case 54u:
-                ascii = (uint8_t)((shifted != 0) ? '<' : ',');
-                break;
-            case 55u:
-                ascii = (uint8_t)((shifted != 0) ? '>' : '.');
-                break;
-            case 56u:
-                ascii = (uint8_t)((shifted != 0) ? '?' : '/');
-                break;
-            default:
-                break;
-        }
-    }
-
-    return (uint16_t)(((key & 0xffu) << 8) | ascii);
-}
-
-static const char *rasta_framebuffer_path(void)
-{
-    const char *value = getenv("GEM_RASTA_FRAMEBUFFER");
-
-    if (value != NULL && value[0] != '\0') {
-        return value;
-    }
-
-    value = getenv("RASTA_FRAMEBUFFER");
-    if (value != NULL && value[0] != '\0') {
-        return value;
-    }
-
-    return "/tmp/rasta.fb";
-}
-
-static const char *rasta_host(void)
-{
-    const char *value = getenv("GEM_RASTA_HOST");
-
-    if (value != NULL && value[0] != '\0') {
-        return value;
-    }
-
-    value = getenv("RASTA_HOST");
-    if (value != NULL && value[0] != '\0') {
-        return value;
-    }
-
-    return "127.0.0.1";
-}
-
-static uint16_t rasta_port(void)
-{
-    const char *value = getenv("GEM_RASTA_PORT");
-    char *end = NULL;
-    unsigned long port;
-
-    if (value == NULL || value[0] == '\0') {
-        value = getenv("RASTA_PORT");
-    }
-    if (value == NULL || value[0] == '\0') {
-        return 5000u;
-    }
-
-    port = strtoul(value, &end, 10);
-    if (end == value || *end != '\0' || port == 0ul || port > 65535ul) {
-        return 5000u;
-    }
-
-    return (uint16_t)port;
-}
-
-static uint16_t rasta_scale(void)
-{
-    const char *value = getenv("GEM_RASTA_SCALE");
-    char *end = NULL;
-    unsigned long scale;
-
-    if (value == NULL || value[0] == '\0') {
-        value = getenv("RASTA_SCALE");
-    }
-    if (value == NULL || value[0] == '\0') {
-        return 1u;
-    }
-
-    scale = strtoul(value, &end, 10);
-    if (end == value || *end != '\0' || scale == 0ul || scale > 65535ul) {
-        return 1u;
-    }
-
-    return (uint16_t)scale;
-}
-
-static const char *rasta_cursor_mode(void)
-{
-    const char *value = getenv("GEM_RASTA_CURSOR");
-
-    if (value == NULL || value[0] == '\0') {
-        value = getenv("RASTA_CURSOR");
-    }
-    if (value == NULL || value[0] == '\0') {
-        return "off";
-    }
-
-    if (strcmp(value, "on") == 0 || strcmp(value, "true") == 0 ||
-        strcmp(value, "1") == 0) {
-        return "on";
-    }
-
-    return "off";
-}
-
-static const char *rasta_inverse_mode(void)
-{
-    const char *value = getenv("GEM_RASTA_INVERSE");
-
-    if (value == NULL || value[0] == '\0') {
-        value = getenv("RASTA_INVERSE");
-    }
-    if (value == NULL || value[0] == '\0') {
-        return "on";
-    }
-
-    if (strcmp(value, "off") == 0 || strcmp(value, "false") == 0 ||
-        strcmp(value, "0") == 0) {
-        return "off";
-    }
-
-    return "on";
 }
 
 static int set_nonblocking(int fd)
@@ -336,7 +127,11 @@ static char *build_subscription_payload(void)
     const char *path = rasta_framebuffer_path();
     uint16_t scale = rasta_scale();
     const char *cursor_mode = rasta_cursor_mode();
-    const char *inverse_mode = rasta_inverse_mode();
+    /* The viewer's --inverse is a bare flag: a value token makes it reject
+     * the whole datagram, leaving its geometry and framebuffer unchanged.
+     * Inversion cannot be switched off by a datagram; the launch flag stays. */
+    const char *inverse_flag =
+        strcmp(rasta_inverse_mode(), "on") == 0 ? " --inverse" : "";
     const char *scan;
     size_t escaped_length;
     size_t total_length;
@@ -356,12 +151,12 @@ static char *build_subscription_payload(void)
         }
     }
 
-    prefix_length = snprintf(
-        NULL, 0,
-        "--width %u --height %u --bpp 1 --scale %u --cursor %s --inverse %s "
-        "--framebuffer \"",
-        (unsigned)surface->width, (unsigned)surface->height, (unsigned)scale,
-        cursor_mode, inverse_mode);
+    prefix_length =
+        snprintf(NULL, 0,
+                 "--width %u --height %u --bpp 1 --scale %u --cursor %s%s "
+                 "--framebuffer \"",
+                 (unsigned)surface->width, (unsigned)surface->height,
+                 (unsigned)scale, cursor_mode, inverse_flag);
     if (prefix_length < 0) {
         errno = EOVERFLOW;
         return NULL;
@@ -373,12 +168,12 @@ static char *build_subscription_payload(void)
         return NULL;
     }
 
-    prefix_length = snprintf(
-        payload, total_length,
-        "--width %u --height %u --bpp 1 --scale %u --cursor %s --inverse %s "
-        "--framebuffer \"",
-        (unsigned)surface->width, (unsigned)surface->height, (unsigned)scale,
-        cursor_mode, inverse_mode);
+    prefix_length =
+        snprintf(payload, total_length,
+                 "--width %u --height %u --bpp 1 --scale %u --cursor %s%s "
+                 "--framebuffer \"",
+                 (unsigned)surface->width, (unsigned)surface->height,
+                 (unsigned)scale, cursor_mode, inverse_flag);
     if (prefix_length < 0 || (size_t)prefix_length >= total_length) {
         free(payload);
         errno = EOVERFLOW;

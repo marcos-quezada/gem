@@ -9,6 +9,7 @@ update this index when documents move or new essential guidance is added.
   does, prerequisites, and how to build, run and install it. Put technical
   details, architecture and implementation history in the appropriate `docs/`
   documents and link to them instead of expanding the README.
+- [Change log](CHANGELOG.md): current user-facing additions, changes and fixes.
 - [Hosted development guide](docs/guides/HOSTED_DEVELOPMENT.md): Rasta setup,
   build options, test execution and VS Code debugging.
 - [Independent samples](docs/guides/SAMPLES.md): application layout, private

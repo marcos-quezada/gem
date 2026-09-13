@@ -20,15 +20,16 @@ Examples:
 
 Every module must follow a classic C layout.
 
-- A public `.h` file in `include/` (or `samples/include/` for sample
+- A public `.h` file in `include/` (or `samples/include/` for shared sample
   interfaces) contains:
   - A file header comment
   - Public declarations
   - Public types
   - Public constants or macros
   - Documentation for every public function
-- A `.c` implementation file (in `src/`, `lib/<name>/`, or `samples/src/` and `samples/lib/`
-  for sample applications) contains:
+- A `.c` implementation file (in `src/`, `src/apps/<application>/`,
+  `lib/<name>/`, or `samples/src/` and `samples/lib/` for independent samples)
+  contains:
   - A file header comment
   - `#include "module.h"`
   - Private static helpers and state
@@ -121,6 +122,9 @@ security patches separately.
 
 Use `.clang-format` with Clang Format 18 for owned C/header layout. `make
 standards` checks the mechanically enforceable rules across the full owned
-source inventory; review semantics, comment accuracy, module boundaries and
-file-size guidance separately. Regenerated RPC sources must pass the same
-formatting and standards checks as handwritten sources.
+source inventory, including identifiers spelled with a reserved underscore and
+uppercase letter (only C keywords such as `_Static_assert` and feature macros
+such as `_POSIX_C_SOURCE` may use that form); review semantics, comment
+accuracy, module boundaries and file-size guidance separately. Regenerated RPC
+sources must pass the same formatting and standards checks as handwritten
+sources.

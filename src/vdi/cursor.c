@@ -1,8 +1,8 @@
 /*
- * Implements private cursor handling for the hosted GEM VDI layer.
- * This includes built-in mouse forms, resource-backed cursor loading,
- * cursor save/restore, and screen presentation that overlays the
- * pointer onto the monochrome framebuffer.
+ * Implements cursor handling for the hosted GEM VDI layer: mouse form
+ * selection, pointer movement with partial presents, saving and restoring
+ * the pixels under the pointer, and the screen presentation that overlays
+ * it on the monochrome framebuffer. Forms are loaded in cursor_forms.c.
  *
  * MIT License (see: LICENSE)
  * Copyright (C) 2026 tomaz stih
@@ -22,293 +22,19 @@
 #include <string.h>
 #include <unistd.h>
 
-#define VDI_WORD_HEX(value) ((WORD)(UWORD)(value))
-
-enum { vdi_cursor_width = 16, vdi_cursor_height = 16 };
-
-enum {
-    vdi_cursor_arrow_hot_x = 0,
-    vdi_cursor_arrow_hot_y = 0,
-    vdi_cursor_text_hot_x = 8,
-    vdi_cursor_text_hot_y = 8,
-    vdi_cursor_bee_hot_x = 7,
-    vdi_cursor_bee_hot_y = 7,
-    vdi_cursor_point_hand_hot_x = 4,
-    vdi_cursor_point_hand_hot_y = 0,
-    vdi_cursor_flat_hand_hot_x = 7,
-    vdi_cursor_flat_hand_hot_y = 0,
-    vdi_cursor_cross_hot_x = 8,
-    vdi_cursor_cross_hot_y = 8
-};
-
-static const MFORM g_vdi_arrow_form = {
-    0,
-    0,
-    1,
-    BLACK,
-    WHITE,
-    {VDI_WORD_HEX(0xc000), VDI_WORD_HEX(0xe000), VDI_WORD_HEX(0xf000),
-     VDI_WORD_HEX(0xf800), VDI_WORD_HEX(0xfc00), VDI_WORD_HEX(0xfe00),
-     VDI_WORD_HEX(0xff00), VDI_WORD_HEX(0xff80), VDI_WORD_HEX(0xffc0),
-     VDI_WORD_HEX(0xffe0), VDI_WORD_HEX(0xfe00), VDI_WORD_HEX(0xef00),
-     VDI_WORD_HEX(0xcf00), VDI_WORD_HEX(0x8780), VDI_WORD_HEX(0x0780),
-     VDI_WORD_HEX(0x0380)},
-    {VDI_WORD_HEX(0x0000), VDI_WORD_HEX(0x4000), VDI_WORD_HEX(0x6000),
-     VDI_WORD_HEX(0x7000), VDI_WORD_HEX(0x7800), VDI_WORD_HEX(0x7c00),
-     VDI_WORD_HEX(0x7e00), VDI_WORD_HEX(0x7f00), VDI_WORD_HEX(0x7f80),
-     VDI_WORD_HEX(0x7c00), VDI_WORD_HEX(0x6c00), VDI_WORD_HEX(0x4600),
-     VDI_WORD_HEX(0x0600), VDI_WORD_HEX(0x0300), VDI_WORD_HEX(0x0300),
-     VDI_WORD_HEX(0x0000)}};
-
-static const MFORM g_vdi_bee_form = {
-    7,
-    7,
-    1,
-    BLACK,
-    WHITE,
-    {VDI_WORD_HEX(0x0e00), VDI_WORD_HEX(0x0e1f), VDI_WORD_HEX(0x0e3f),
-     VDI_WORD_HEX(0x077f), VDI_WORD_HEX(0xe7ff), VDI_WORD_HEX(0xffff),
-     VDI_WORD_HEX(0xffff), VDI_WORD_HEX(0x1fff), VDI_WORD_HEX(0x0fff),
-     VDI_WORD_HEX(0x1ffe), VDI_WORD_HEX(0x3fff), VDI_WORD_HEX(0x7fff),
-     VDI_WORD_HEX(0x7fff), VDI_WORD_HEX(0x7fff), VDI_WORD_HEX(0x7fff),
-     VDI_WORD_HEX(0x7fbf)},
-    {VDI_WORD_HEX(0x0000), VDI_WORD_HEX(0x0400), VDI_WORD_HEX(0x041e),
-     VDI_WORD_HEX(0x0031), VDI_WORD_HEX(0x0361), VDI_WORD_HEX(0x6342),
-     VDI_WORD_HEX(0x0cc5), VDI_WORD_HEX(0x0daa), VDI_WORD_HEX(0x0370),
-     VDI_WORD_HEX(0x0eac), VDI_WORD_HEX(0x19fe), VDI_WORD_HEX(0x30b0),
-     VDI_WORD_HEX(0x216f), VDI_WORD_HEX(0x226c), VDI_WORD_HEX(0x252b),
-     VDI_WORD_HEX(0x1a0a)}};
-
-static uint16_t g_vdi_cursor_saved[vdi_cursor_height];
-
-static void vdi_set_screen_pixel_raw(WORD x, WORD y, WORD color);
-static WORD vdi_get_screen_pixel_raw(WORD x, WORD y);
+static void vdi_cursor_plot_raw(WORD x, WORD y, WORD color);
+static WORD vdi_cursor_pixel_raw(WORD x, WORD y);
 static void vdi_cursor_restore(void);
 static void vdi_cursor_draw(void);
 
-static const char *cursor_resource_path(void)
-{
-    static char path[4096];
-    const char *resource_dir = getenv("GEM_RESOURCE_DIR");
-    ssize_t length;
-    char *slash;
+enum { vdi_cursor_width = 16, vdi_cursor_height = 16 };
 
-    if (resource_dir != NULL && resource_dir[0] != '\0') {
-        if (snprintf(path, sizeof(path), "%s/cursors.rsc", resource_dir) <
-            (int)sizeof(path)) {
-            return path;
-        }
-    }
-    length = readlink("/proc/self/exe", path, sizeof(path) - 1u);
-    if (length > 0 && (size_t)length < sizeof(path)) {
-        path[length] = '\0';
-        slash = strrchr(path, '/');
-        if (slash != NULL) {
-            *slash = '\0';
-            if (strlen(path) + strlen("/../share/gem/cursors.rsc") <
-                sizeof(path)) {
-                strcat(path, "/../share/gem/cursors.rsc");
-                if (access(path, R_OK) == 0) {
-                    return path;
-                }
-            }
-        }
-    }
-#ifdef GEM_BUILD_CURSOR_RSC
-    return GEM_BUILD_CURSOR_RSC;
-#else
-    return "bin/resources/cursors.rsc";
-#endif
-}
+static uint16_t g_vdi_cursor_saved[vdi_cursor_height];
 
-static int vdi_load_binary_file(const char *path, uint8_t **data_out,
-                                size_t *size_out)
-{
-    FILE *stream;
-    long size;
-    uint8_t *data;
-
-    if (path == NULL || data_out == NULL || size_out == NULL) {
-        return 0;
-    }
-
-    stream = fopen(path, "rb");
-    if (stream == NULL) {
-        return 0;
-    }
-    if (fseek(stream, 0L, SEEK_END) != 0) {
-        fclose(stream);
-        return 0;
-    }
-    size = ftell(stream);
-    if (size < 0 || fseek(stream, 0L, SEEK_SET) != 0) {
-        fclose(stream);
-        return 0;
-    }
-
-    data = malloc((size_t)size);
-    if (data == NULL) {
-        fclose(stream);
-        return 0;
-    }
-    if (size > 0 && fread(data, (size_t)size, 1, stream) != 1) {
-        free(data);
-        fclose(stream);
-        return 0;
-    }
-    fclose(stream);
-
-    *data_out = data;
-    *size_out = (size_t)size;
-    return 1;
-}
-
-static const void *vdi_resource_ptr(const uint8_t *base, size_t size,
-                                    LONG offset, size_t bytes)
-{
-    size_t start;
-
-    if (base == NULL || offset < 0) {
-        return NULL;
-    }
-
-    start = (size_t)offset;
-    if (start > size || bytes > size - start) {
-        return NULL;
-    }
-    return base + start;
-}
-
-static WORD vdi_cursor_hot_x_for_selector(WORD selector)
-{
-    switch (selector) {
-        case TEXT_CRSR:
-            return vdi_cursor_text_hot_x;
-        case HGLASS:
-            return vdi_cursor_bee_hot_x;
-        case POINT_HAND:
-            return vdi_cursor_point_hand_hot_x;
-        case FLAT_HAND:
-            return vdi_cursor_flat_hand_hot_x;
-        case THIN_CROSS:
-        case THICK_CROSS:
-        case OUTLN_CROSS:
-            return vdi_cursor_cross_hot_x;
-        default:
-            return vdi_cursor_arrow_hot_x;
-    }
-}
-
-static WORD vdi_cursor_hot_y_for_selector(WORD selector)
-{
-    switch (selector) {
-        case TEXT_CRSR:
-            return vdi_cursor_text_hot_y;
-        case HGLASS:
-            return vdi_cursor_bee_hot_y;
-        case POINT_HAND:
-            return vdi_cursor_point_hand_hot_y;
-        case FLAT_HAND:
-            return vdi_cursor_flat_hand_hot_y;
-        case THIN_CROSS:
-        case THICK_CROSS:
-        case OUTLN_CROSS:
-            return vdi_cursor_cross_hot_y;
-        default:
-            return vdi_cursor_arrow_hot_y;
-    }
-}
-
-static void vdi_copy_builtin_cursor_forms(void)
-{
-    WORD selector;
-
-    for (selector = 0; selector < vdi_standard_cursor_count; ++selector) {
-        vdi_state.standard_mouse_forms[selector] = g_vdi_arrow_form;
-    }
-    vdi_state.standard_mouse_forms[ARROW] = g_vdi_arrow_form;
-    vdi_state.standard_mouse_forms[HGLASS] = g_vdi_bee_form;
-}
-
-static int vdi_load_iconblk_cursor(const uint8_t *base, size_t size,
-                                   const ICONBLK *icon, WORD selector,
-                                   MFORM *out)
-{
-    const WORD *mask;
-    const WORD *data;
-    WORD row;
-
-    if (base == NULL || icon == NULL || out == NULL ||
-        icon->ib_wicon != vdi_cursor_width ||
-        icon->ib_hicon != vdi_cursor_height) {
-        return 0;
-    }
-
-    mask = vdi_resource_ptr(base, size, icon->ib_pmask, sizeof(out->mf_mask));
-    data = vdi_resource_ptr(base, size, icon->ib_pdata, sizeof(out->mf_data));
-    if (mask == NULL || data == NULL) {
-        return 0;
-    }
-
-    memset(out, 0, sizeof(*out));
-    if (icon->ib_xchar >= 0 && icon->ib_xchar < icon->ib_wicon &&
-        icon->ib_ychar >= 0 && icon->ib_ychar < icon->ib_hicon) {
-        out->mf_xhot = icon->ib_xchar;
-        out->mf_yhot = icon->ib_ychar;
-    } else {
-        out->mf_xhot = vdi_cursor_hot_x_for_selector(selector);
-        out->mf_yhot = vdi_cursor_hot_y_for_selector(selector);
-    }
-    out->mf_nplanes = 1;
-    out->mf_fg = BLACK;
-    out->mf_bg = WHITE;
-    for (row = 0; row < vdi_cursor_height; ++row) {
-        out->mf_mask[row] = mask[row];
-        out->mf_data[row] = data[row];
-    }
-    return 1;
-}
-
-WORD vdi_load_standard_mouse_forms(void)
-{
-    const char *path = cursor_resource_path();
-    uint8_t *resource = NULL;
-    size_t resource_size = 0;
-    const RSHDR *header;
-    const ICONBLK *icons;
-    WORD selector;
-
-    vdi_copy_builtin_cursor_forms();
-
-    if (!vdi_load_binary_file(path, &resource, &resource_size)) {
-        vdi_state.mouse_form = vdi_state.standard_mouse_forms[ARROW];
-        return 1;
-    }
-    if (resource_size < sizeof(RSHDR)) {
-        free(resource);
-        vdi_state.mouse_form = vdi_state.standard_mouse_forms[ARROW];
-        return 1;
-    }
-
-    header = (const RSHDR *)resource;
-    icons =
-        vdi_resource_ptr(resource, resource_size, header->rsh_iconblk,
-                         sizeof(ICONBLK) * (size_t)vdi_standard_cursor_count);
-    if (header->rsh_nib >= vdi_standard_cursor_count && icons != NULL) {
-        for (selector = 0; selector < vdi_standard_cursor_count; ++selector) {
-            MFORM form;
-
-            if (vdi_load_iconblk_cursor(resource, resource_size,
-                                        &icons[selector], selector, &form)) {
-                vdi_state.standard_mouse_forms[selector] = form;
-            }
-        }
-    }
-
-    free(resource);
-    vdi_state.mouse_form = vdi_state.standard_mouse_forms[ARROW];
-    return 1;
-}
+static void vdi_cursor_plot_raw(WORD x, WORD y, WORD color);
+static WORD vdi_cursor_pixel_raw(WORD x, WORD y);
+static void vdi_cursor_restore(void);
+static void vdi_cursor_draw(void);
 
 WORD vdi_set_mouse_form(const MFORM *form)
 {
@@ -401,7 +127,7 @@ void vdi_prepare_screen_write(void)
     vdi_cursor_restore();
 }
 
-static void vdi_set_screen_pixel_raw(WORD x, WORD y, WORD color)
+static void vdi_cursor_plot_raw(WORD x, WORD y, WORD color)
 {
     uint8_t *row;
     uint8_t mask;
@@ -421,7 +147,7 @@ static void vdi_set_screen_pixel_raw(WORD x, WORD y, WORD color)
     }
 }
 
-static WORD vdi_get_screen_pixel_raw(WORD x, WORD y)
+static WORD vdi_cursor_pixel_raw(WORD x, WORD y)
 {
     const uint8_t *row;
 
@@ -453,9 +179,9 @@ static void vdi_cursor_restore(void)
             if ((vdi_state.mouse_form.mf_mask[y] & bit) == 0u) {
                 continue;
             }
-            vdi_set_screen_pixel_raw(
-                (WORD)(vdi_state.cursor_x + x), (WORD)(vdi_state.cursor_y + y),
-                (WORD)((g_vdi_cursor_saved[y] & bit) != 0u));
+            vdi_cursor_plot_raw((WORD)(vdi_state.cursor_x + x),
+                                (WORD)(vdi_state.cursor_y + y),
+                                (WORD)((g_vdi_cursor_saved[y] & bit) != 0u));
         }
     }
 
@@ -493,13 +219,13 @@ static void vdi_cursor_draw(void)
             if ((vdi_state.mouse_form.mf_mask[y] & bit) == 0u) {
                 continue;
             }
-            if (vdi_get_screen_pixel_raw(px, py) != 0) {
+            if (vdi_cursor_pixel_raw(px, py) != 0) {
                 saved |= bit;
             }
             if ((vdi_state.mouse_form.mf_data[y] & bit) != 0u) {
-                vdi_set_screen_pixel_raw(px, py, fg_color);
+                vdi_cursor_plot_raw(px, py, fg_color);
             } else {
-                vdi_set_screen_pixel_raw(px, py, bg_color);
+                vdi_cursor_plot_raw(px, py, bg_color);
             }
         }
         g_vdi_cursor_saved[y] = saved;

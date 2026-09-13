@@ -1,12 +1,15 @@
 /*
- * Implements the private hosted AES core state, tracing,
- * shared geometry helpers, and file/path utility routines.
+ * Implements the private hosted AES core: runtime state and reset,
+ * tracing, physical input state, chrome heights, application and window
+ * lookup, parent search, spec resolution, menu text helpers and the
+ * saved-region pixel copies used by popups and alerts.
  *
  * MIT License (see: LICENSE)
  * Copyright (C) 2026 tomaz stih
  */
 
 #include "aes_internal.h"
+#include "aes_shel.h"
 
 #include "../vdi/vdi_internal.h"
 
@@ -15,8 +18,10 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+
+static void aes_write_trace(const char *fmt, va_list ap);
+static void aes_update_hover_mouse_cursor(WORD x, WORD y);
 
 aes_state_t aes_state;
 int (*aes_wait_hook)(void);
@@ -28,26 +33,20 @@ __attribute__((weak)) int gem_builtin_rsrc_gaddr(WORD type, WORD index,
                                                  void **addr);
 __attribute__((weak)) void gem_builtin_rsrc_free(void);
 extern WORD vdi_select_system_mouse_form(WORD selector);
-static void aes_write_trace(const char *env_var, const char *fmt, va_list ap);
+static void aes_write_trace(const char *fmt, va_list ap);
 void aes_trace(const char *fmt, ...);
 void aes_store_mouse_state(const gem_hid_event_t *evt);
 void aes_store_key_state(const gem_hid_event_t *evt);
 static void aes_update_hover_mouse_cursor(WORD x, WORD y);
 WORD aes_chrome_height(void);
 WORD aes_menu_chrome_height(void);
+int aes_menu_strip_reserved(void);
 WORD aes_menu_bar_height(void);
-WORD aes_min_word(WORD left, WORD right);
-WORD aes_max_word(WORD left, WORD right);
-void aes_set_rect(GRECT *rect, WORD x, WORD y, WORD w, WORD h);
-int aes_point_in_rect(WORD x, WORD y, const GRECT *rect);
 void aes_reset_state(void);
 int aes_ensure_vdi(void);
 aes_app_t *aes_find_app_by_id(WORD id);
 aes_window_t *aes_find_window(WORD handle);
 void aes_desktop_rect(GRECT *rect);
-int aes_rects_intersect(const GRECT *left, const GRECT *right);
-int aes_intersect_rects(const GRECT *left, const GRECT *right, GRECT *out);
-WORD aes_subtract_rect(const GRECT *source, const GRECT *cover, GRECT out[4]);
 WORD aes_find_parent(OBJECT *tree, WORD object);
 LONG aes_resolve_spec(const OBJECT *obj);
 int aes_menu_is_separator_text(const char *text);
@@ -57,11 +56,6 @@ WORD aes_light_color(void);
 WORD aes_dark_color(void);
 int aes_save_region_pixels(const GRECT *rect, uint8_t **pixels_out);
 void aes_restore_region_pixels(const GRECT *rect, uint8_t *pixels);
-int aes_load_file(const char *filename, void **data_out, size_t *size_out);
-static void aes_ascii_lower(const char *source, char *target,
-                            size_t target_size);
-int aes_try_resolve_path(const char *filename, char *resolved,
-                         size_t resolved_size);
 
 __attribute__((weak)) int gem_builtin_rsrc_load(const char *filename)
 {
@@ -80,22 +74,35 @@ __attribute__((weak)) int gem_builtin_rsrc_gaddr(WORD type, WORD index,
 
 __attribute__((weak)) void gem_builtin_rsrc_free(void) {}
 
-static void aes_write_trace(const char *env_var, const char *fmt, va_list ap)
+static void aes_write_trace(const char *fmt, va_list ap)
 {
-    const char *trace = getenv(env_var);
-
-    if (trace == NULL || trace[0] == '\0') {
-        return;
-    }
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
+}
+
+/* Resolve the environment once: tracing sits on the per-request drawing
+ * path, where a getenv scan for every call is measurable. */
+static int aes_trace_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *trace = gem_os_getenv_ref("GEM_TRACE_AES");
+
+        enabled = trace != NULL && trace[0] != '\0';
+    }
+    return enabled;
 }
 
 void aes_trace(const char *fmt, ...)
 {
     va_list ap;
+
+    if (!aes_trace_enabled()) {
+        return;
+    }
     va_start(ap, fmt);
-    aes_write_trace("GEM_TRACE_AES", fmt, ap);
+    aes_write_trace(fmt, ap);
     va_end(ap);
 }
 
@@ -172,11 +179,19 @@ WORD aes_menu_chrome_height(void)
     return (WORD)(text_height + 6);
 }
 
+int aes_menu_strip_reserved(void)
+{
+    /* The system menu belongs to the shared desktop context: the bar strip
+     * is reserved (with the always-present system title) whenever a desktop
+     * owner exists, and a lone standalone application keeps the full screen. */
+    return aes_state.vdi_ready != 0 && aes_state.desktop_owner_app_id != 0;
+}
+
 WORD aes_menu_bar_height(void)
 {
     WORD box_height = 0;
 
-    if (aes_state.menu_visible == 0 || aes_state.menu_tree == NULL) {
+    if (!aes_menu_strip_reserved()) {
         return 0;
     }
 
@@ -187,41 +202,10 @@ WORD aes_menu_bar_height(void)
     return box_height;
 }
 
-WORD aes_min_word(WORD left, WORD right)
-{
-    return (left < right) ? left : right;
-}
-
-WORD aes_max_word(WORD left, WORD right)
-{
-    return (left > right) ? left : right;
-}
-
-void aes_set_rect(GRECT *rect, WORD x, WORD y, WORD w, WORD h)
-{
-    if (rect == NULL) {
-        return;
-    }
-
-    rect->g_x = x;
-    rect->g_y = y;
-    rect->g_w = w;
-    rect->g_h = h;
-}
-
-int aes_point_in_rect(WORD x, WORD y, const GRECT *rect)
-{
-    if (rect == NULL) {
-        return 0;
-    }
-
-    return x >= rect->g_x && y >= rect->g_y && x < rect->g_x + rect->g_w &&
-           y < rect->g_y + rect->g_h;
-}
-
 void aes_reset_state(void)
 {
     memset(&aes_state, 0, sizeof(aes_state));
+    aes_shel_reset();
     aes_state.next_app_id = 1;
     aes_state.next_window_z = 1u;
     aes_state.next_message_seq = 1u;
@@ -310,102 +294,6 @@ void aes_desktop_rect(GRECT *rect)
 
     aes_set_rect(rect, 0, 0, (WORD)(aes_state.work_out[0] + 1),
                  (WORD)(aes_state.work_out[1] + 1));
-}
-
-int aes_rects_intersect(const GRECT *left, const GRECT *right)
-{
-    WORD left_right;
-    WORD left_bottom;
-    WORD right_right;
-    WORD right_bottom;
-
-    if (left == NULL || right == NULL || left->g_w <= 0 || left->g_h <= 0 ||
-        right->g_w <= 0 || right->g_h <= 0) {
-        return 0;
-    }
-
-    left_right = (WORD)(left->g_x + left->g_w - 1);
-    left_bottom = (WORD)(left->g_y + left->g_h - 1);
-    right_right = (WORD)(right->g_x + right->g_w - 1);
-    right_bottom = (WORD)(right->g_y + right->g_h - 1);
-
-    if (left_right < right->g_x || right_right < left->g_x ||
-        left_bottom < right->g_y || right_bottom < left->g_y) {
-        return 0;
-    }
-    return 1;
-}
-
-int aes_intersect_rects(const GRECT *left, const GRECT *right, GRECT *out)
-{
-    WORD left_right;
-    WORD left_bottom;
-    WORD right_right;
-    WORD right_bottom;
-    WORD x0;
-    WORD y0;
-    WORD x1;
-    WORD y1;
-
-    if (out == NULL || aes_rects_intersect(left, right) == 0) {
-        return 0;
-    }
-
-    left_right = (WORD)(left->g_x + left->g_w - 1);
-    left_bottom = (WORD)(left->g_y + left->g_h - 1);
-    right_right = (WORD)(right->g_x + right->g_w - 1);
-    right_bottom = (WORD)(right->g_y + right->g_h - 1);
-
-    x0 = aes_max_word(left->g_x, right->g_x);
-    y0 = aes_max_word(left->g_y, right->g_y);
-    x1 = aes_min_word(left_right, right_right);
-    y1 = aes_min_word(left_bottom, right_bottom);
-    aes_set_rect(out, x0, y0, (WORD)(x1 - x0 + 1), (WORD)(y1 - y0 + 1));
-    return 1;
-}
-
-WORD aes_subtract_rect(const GRECT *source, const GRECT *cover, GRECT out[4])
-{
-    GRECT overlap;
-    WORD count = 0;
-    WORD source_right;
-    WORD source_bottom;
-    WORD overlap_right;
-    WORD overlap_bottom;
-
-    if (out == NULL || source == NULL || source->g_w <= 0 || source->g_h <= 0) {
-        return 0;
-    }
-
-    if (cover == NULL || cover->g_w <= 0 || cover->g_h <= 0 ||
-        aes_intersect_rects(source, cover, &overlap) == 0) {
-        out[0] = *source;
-        return 1;
-    }
-
-    source_right = (WORD)(source->g_x + source->g_w - 1);
-    source_bottom = (WORD)(source->g_y + source->g_h - 1);
-    overlap_right = (WORD)(overlap.g_x + overlap.g_w - 1);
-    overlap_bottom = (WORD)(overlap.g_y + overlap.g_h - 1);
-
-    if (source->g_y < overlap.g_y) {
-        aes_set_rect(&out[count++], source->g_x, source->g_y, source->g_w,
-                     (WORD)(overlap.g_y - source->g_y));
-    }
-    if (overlap_bottom < source_bottom) {
-        aes_set_rect(&out[count++], source->g_x, (WORD)(overlap_bottom + 1),
-                     source->g_w, (WORD)(source_bottom - overlap_bottom));
-    }
-    if (source->g_x < overlap.g_x) {
-        aes_set_rect(&out[count++], source->g_x, overlap.g_y,
-                     (WORD)(overlap.g_x - source->g_x), overlap.g_h);
-    }
-    if (overlap_right < source_right) {
-        aes_set_rect(&out[count++], (WORD)(overlap_right + 1), overlap.g_y,
-                     (WORD)(source_right - overlap_right), overlap.g_h);
-    }
-
-    return count;
 }
 
 WORD aes_find_parent(OBJECT *tree, WORD object)
@@ -517,6 +405,11 @@ int aes_menu_split_shortcut(const char *text, char *label, size_t label_size,
         return 0;
     }
 
+    /* Resource menus traditionally reserve leading blanks for a checkmark. */
+    while (*text == ' ') {
+        ++text;
+    }
+
     tab = strchr(text, '\t');
     if (tab == NULL) {
         strncpy(label, text, label_size - 1u);
@@ -534,6 +427,9 @@ int aes_menu_split_shortcut(const char *text, char *label, size_t label_size,
     aes_rtrim_ascii_whitespace(label);
 
     ++tab;
+    while (*tab == ' ') {
+        ++tab;
+    }
     right_len = strlen(tab);
     if (right_len >= shortcut_size) {
         right_len = shortcut_size - 1u;
@@ -608,152 +504,4 @@ void aes_restore_region_pixels(const GRECT *rect, uint8_t *pixels)
     vdi_mark_dirty(rect->g_x, rect->g_y, (WORD)(rect->g_x + rect->g_w - 1),
                    (WORD)(rect->g_y + rect->g_h - 1));
     vdi_present_screen();
-}
-
-int aes_load_file(const char *filename, void **data_out, size_t *size_out)
-{
-    int fd;
-    int32_t read_size;
-    size_t capacity = 4096u;
-    size_t used = 0;
-    char *buffer;
-
-    if (filename == NULL || data_out == NULL || size_out == NULL) {
-        return 0;
-    }
-
-    fd = gem_os_open_read(filename);
-    if (fd < 0) {
-        return 0;
-    }
-
-    buffer = gem_os_alloc(capacity);
-    if (buffer == NULL) {
-        (void)gem_os_close(fd);
-        return 0;
-    }
-
-    FOREVER
-    {
-        if (used == capacity) {
-            size_t new_capacity = capacity * 2u;
-            char *new_buffer = gem_os_alloc(new_capacity);
-
-            if (new_buffer == NULL) {
-                gem_os_free(buffer);
-                (void)gem_os_close(fd);
-                return 0;
-            }
-            memcpy(new_buffer, buffer, used);
-            gem_os_free(buffer);
-            buffer = new_buffer;
-            capacity = new_capacity;
-        }
-
-        read_size = gem_os_read(fd, buffer + used, (uint32_t)(capacity - used));
-        if (read_size < 0) {
-            gem_os_free(buffer);
-            (void)gem_os_close(fd);
-            return 0;
-        }
-        if (read_size == 0) {
-            break;
-        }
-        used += (size_t)read_size;
-    }
-
-    (void)gem_os_close(fd);
-    *data_out = buffer;
-    *size_out = used;
-    return 1;
-}
-
-static void aes_ascii_lower(const char *source, char *target,
-                            size_t target_size)
-{
-    size_t i;
-
-    if (target == NULL || target_size == 0u) {
-        return;
-    }
-
-    if (source == NULL) {
-        target[0] = '\0';
-        return;
-    }
-
-    for (i = 0; source[i] != '\0' && i + 1u < target_size; ++i) {
-        char ch = source[i];
-
-        if (ch >= 'A' && ch <= 'Z') {
-            ch = (char)(ch - 'A' + 'a');
-        }
-        target[i] = ch;
-    }
-    target[i] = '\0';
-}
-
-int aes_try_resolve_path(const char *filename, char *resolved,
-                         size_t resolved_size)
-{
-    static const char *search_dirs[] = {"", "bin/resources/"};
-    const char *resource_dir;
-    char lowercase[260];
-    size_t i;
-
-    if (filename == NULL || resolved == NULL || resolved_size == 0u) {
-        return 0;
-    }
-
-    aes_ascii_lower(filename, lowercase, sizeof(lowercase));
-    resource_dir = getenv("GEM_RESOURCE_DIR");
-    if (resource_dir != NULL && resource_dir[0] != '\0') {
-        int rc =
-            snprintf(resolved, resolved_size, "%s/%s", resource_dir, filename);
-        int fd;
-
-        if (rc > 0 && (size_t)rc < resolved_size) {
-            fd = gem_os_open_read(resolved);
-            if (fd >= 0) {
-                (void)gem_os_close(fd);
-                return 1;
-            }
-        }
-        rc =
-            snprintf(resolved, resolved_size, "%s/%s", resource_dir, lowercase);
-        if (rc > 0 && (size_t)rc < resolved_size) {
-            fd = gem_os_open_read(resolved);
-            if (fd >= 0) {
-                (void)gem_os_close(fd);
-                return 1;
-            }
-        }
-    }
-
-    for (i = 0; i < sizeof(search_dirs) / sizeof(search_dirs[0]); ++i) {
-        const char *dir = search_dirs[i];
-        int rc;
-        int fd;
-
-        rc = snprintf(resolved, resolved_size, "%s%s", dir, filename);
-        if (rc > 0 && (size_t)rc < resolved_size) {
-            fd = gem_os_open_read(resolved);
-            if (fd >= 0) {
-                (void)gem_os_close(fd);
-                return 1;
-            }
-        }
-
-        rc = snprintf(resolved, resolved_size, "%s%s", dir, lowercase);
-        if (rc > 0 && (size_t)rc < resolved_size) {
-            fd = gem_os_open_read(resolved);
-
-            if (fd >= 0) {
-                (void)gem_os_close(fd);
-                return 1;
-            }
-        }
-    }
-
-    return 0;
 }
