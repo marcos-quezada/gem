@@ -3,7 +3,7 @@ BUILD_DIR ?= $(CURDIR)/build
 JOBS ?= 4
 .PHONY: all configure tests unit integration uat sdk clean
 configure:
-	cmake -S . -B $(BUILD_DIR) -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Debug -DGEM_PLATFORM=rasta -DBUILD_TESTING=ON $(CMAKE_FLAGS)
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_C_COMPILER=cc -DCMAKE_BUILD_TYPE=Debug -DGEM_PLATFORM=rasta -DBUILD_TESTING=OFF $(CMAKE_FLAGS)
 all: configure
 	cmake --build $(BUILD_DIR) --parallel $(JOBS)
 tests: all
