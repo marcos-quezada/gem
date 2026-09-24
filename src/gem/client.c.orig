@@ -21,9 +21,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#if defined(__FreeBSD__)
-#include <sys/ucred.h>
-#endif
 #include <unistd.h>
 
 WORD contrl[12] __attribute__((weak));
@@ -86,11 +83,7 @@ static int gem_rpc_recv_all(int fd, void *buf, size_t size)
 static int gem_rpc_connect(void)
 {
     struct sockaddr_un addr;
-#if defined(__FreeBSD__)
-    struct xucred peer;
-#else
     struct ucred peer;
-#endif
     socklen_t peer_size = sizeof(peer);
     int fd;
 
@@ -114,19 +107,11 @@ static int gem_rpc_connect(void)
         (void)close(fd);
         return 0;
     }
-#if defined(__FreeBSD__)
-    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &peer, &peer_size) != 0 ||
-        peer.cr_version != XUCRED_VERSION || peer.cr_uid != geteuid()) {
-        (void)close(fd);
-        return 0;
-    }
-#else
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
         peer.uid != geteuid()) {
         (void)close(fd);
         return 0;
     }
-#endif
 
     g_gem_socket = fd;
     return 1;

@@ -22,8 +22,6 @@ target_include_directories(gem
 
 if(GEM_PLATFORM STREQUAL "linux")
     target_link_libraries(gem PUBLIC platform_linux)
-elseif(GEM_PLATFORM STREQUAL "freebsd")
-    target_link_libraries(gem PUBLIC platform_freebsd)
 else()
     target_link_libraries(gem PUBLIC rasta)
 endif()

@@ -21,9 +21,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
-#if defined(__FreeBSD__)
-#include <sys/ucred.h>
-#endif
 #include <unistd.h>
 
 void gemd_free_session_menu(gemd_session_t *session)
@@ -244,20 +241,6 @@ void gemd_accept_client(void)
     gemd_session_t *session = gemd_alloc_session();
     int fd = accept(g_listen_fd, NULL, NULL);
     if (fd >= 0) {
-#if defined(__FreeBSD__)
-        struct xucred peer;
-        socklen_t length = sizeof(peer);
-        if (session && gemd_nonblocking(fd) &&
-            getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &peer, &length) == 0 &&
-            peer.cr_version == XUCRED_VERSION && peer.cr_uid == geteuid()) {
-            memset(session, 0, sizeof(*session));
-            session->fd = fd;
-            session->pid = (int)peer.cr_pid;
-            session->generation = ++g_next_generation;
-            session->accepted_at = gem_os_ticks_ms();
-        } else
-            close(fd);
-#else
         struct ucred peer;
         socklen_t length = sizeof(peer);
         if (session && gemd_nonblocking(fd) &&
@@ -270,7 +253,6 @@ void gemd_accept_client(void)
             session->accepted_at = gem_os_ticks_ms();
         } else
             close(fd);
-#endif
     }
 }
 

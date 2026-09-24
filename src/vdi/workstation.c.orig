@@ -37,8 +37,8 @@ WORD vdi_color_to_pixel(WORD color_index)
 
 VOID v_opnvwk(WORD work_in[11], VDI_HANDLE *handle, WORD work_out[57])
 {
-#if defined(GEM_PLATFORM_LINUX) || defined(GEM_PLATFORM_FREEBSD)
-    /* 0 = fill the native display (see linux/freebsd gem_raster_init). */
+#if defined(GEM_PLATFORM_LINUX)
+    /* 0 = fill the native framebuffer (see linux gem_raster_init). */
     WORD width = vdi_parse_env_word("GEM_VDI_WIDTH", 0);
     WORD height = vdi_parse_env_word("GEM_VDI_HEIGHT", 0);
 #else

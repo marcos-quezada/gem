@@ -8,16 +8,7 @@
  */
 
 #define _GNU_SOURCE
-#if !defined(__FreeBSD__)
-/*
- * FreeBSD's libc treats an explicit _POSIX_C_SOURCE as "strict POSIX
- * only", which hides BSD/Linux extensions like pipe2() that this file
- * also uses (no equivalent macro is required for them per pipe2(2)'s
- * own SYNOPSIS). Only defined on non-FreeBSD, where it's needed and
- * doesn't suppress anything this file relies on.
- */
 #define _POSIX_C_SOURCE 200809L
-#endif
 
 #include "platform/os.h"
 
@@ -31,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(__FreeBSD__)
-#include <sys/types.h>
 #include <sys/param.h>
 #include <sys/mount.h>
 #else
