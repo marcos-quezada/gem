@@ -70,7 +70,23 @@ int gem_os_pty_spawn_shell(gem_os_pty_t *pty, const char *shell_path,
 
     pty->master_fd = -1;
     pty->child_pid = -1;
-    master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_NONBLOCK);
+    /*
+     * Confirmed on real FreeBSD hardware: its posix_openpt() rejects
+     * O_NONBLOCK in the flags argument with EINVAL -- only O_RDWR/
+     * O_NOCTTY are accepted there (Linux accepts O_NONBLOCK too, which
+     * is how this went unnoticed). Open without it, then set
+     * non-blocking via a separate fcntl() -- portable regardless of
+     * what a given OS's posix_openpt() itself accepts.
+     */
+    master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master_fd >= 0) {
+        int flags = fcntl(master_fd, F_GETFL, 0);
+
+        if (flags < 0 || fcntl(master_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            (void)close(master_fd);
+            master_fd = -1;
+        }
+    }
     if (master_fd < 0) {
         return 0;
     }

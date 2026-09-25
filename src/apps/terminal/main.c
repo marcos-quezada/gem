@@ -364,11 +364,13 @@ static int init_terminal(term_state_t *state)
     if (!gem_os_getcwd(cwd, sizeof(cwd))) {
         cwd[0] = '\0';
     }
-    /* Interactive bash; platform falls back if the path is unusable. */
+    /* Interactive shell; the platform PTY layer picks bash if it exists,
+     * falling back to /bin/sh otherwise (confirmed: this project's own
+     * hardcoded "/bin/bash" here bypassed that existence check entirely,
+     * and FreeBSD ships bash at /usr/local/bin/bash, not /bin/bash). */
     shell = gem_os_getenv_ref("GEM_SHELL");
-    if (!gem_os_pty_spawn_shell(&state->pty,
-                                shell != NULL ? shell : "/bin/bash", cwd,
-                                TERM_INITIAL_COLS, TERM_INITIAL_ROWS)) {
+    if (!gem_os_pty_spawn_shell(&state->pty, shell, cwd,
+                                 TERM_INITIAL_COLS, TERM_INITIAL_ROWS)) {
         gem_os_free(state->primary_cells);
         gem_os_free(state->primary_attrs);
         gem_os_free(state->alternate_cells);
