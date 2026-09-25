@@ -24,6 +24,13 @@ target_include_directories(gemd
 
 target_link_libraries(gemd PRIVATE aes)
 
+if(GEM_PLATFORM STREQUAL "freebsd")
+    # gemd is the sole libseat client (gem-freebsd-libseat design.md) --
+    # needs the same compile define vdi already uses, so main.c/session.c
+    # know to call gem_freebsd_seat_init/shutdown/fd/dispatch.
+    target_compile_definitions(gemd PRIVATE GEM_PLATFORM_FREEBSD=1)
+endif()
+
 set_target_properties(gemd PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${GEM_CORE_DIR}
 )

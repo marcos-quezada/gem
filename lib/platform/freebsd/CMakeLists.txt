@@ -28,6 +28,15 @@ target_link_libraries(platform_freebsd PUBLIC PkgConfig::GEM_LIBDRM)
 # pci_set_powerstate/pci_enable_io transitions.
 target_link_libraries(platform_freebsd PUBLIC devctl)
 
+# libseat -- non-root DRM/evdev device access, replacing the raw open()/
+# close() calls in raster.c/hid.c (gem-freebsd-libseat). Same
+# pkg_check_modules pattern already used for libdrm above; a single
+# "seatd" package on FreeBSD provides both the seatd daemon and libseat
+# itself, confirmed live against the target machine (no separate
+# "libseat" package exists).
+pkg_check_modules(GEM_LIBSEAT REQUIRED IMPORTED_TARGET libseat)
+target_link_libraries(platform_freebsd PUBLIC PkgConfig::GEM_LIBSEAT)
+
 target_compile_options(platform_freebsd
     PRIVATE
         -Wall

@@ -15,6 +15,10 @@
 
 #include "platform/raster.h"
 
+#ifdef GEM_PLATFORM_FREEBSD
+#include "platform/freebsd_seat.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -336,6 +340,9 @@ void gemd_shutdown(void)
      * mapped -- to leave the viewer a cleared screen with no window ghosts. */
     gem_raster_clear();
     gemd_shutdown_server_vdi();
+#ifdef GEM_PLATFORM_FREEBSD
+    gem_freebsd_seat_shutdown();
+#endif
     if (g_listen_fd >= 0) {
         (void)close(g_listen_fd);
         g_listen_fd = -1;

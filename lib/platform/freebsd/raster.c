@@ -24,9 +24,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "platform/raster.h"
+#include "platform/freebsd_seat.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +73,25 @@ static int g_drm_fd = -1;
 static uint32_t g_connector_id;
 static drmModeCrtcPtr g_saved_crtc;
 static int g_power_cycled_after_first_content;
+static int g_drm_device_id = -1;
+static drmModeModeInfo g_current_mode;
+static int g_have_current_mode;
+static struct timespec g_init_time;
+static int g_have_init_time;
+
+static long elapsed_ms_since_init(void)
+{
+    struct timespec now;
+
+    if (!g_have_init_time) {
+        return 0;
+    }
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return (long)(now.tv_sec - g_init_time.tv_sec) * 1000L +
+           (now.tv_nsec - g_init_time.tv_nsec) / 1000000L;
+}
 
 static const char *drm_device_path(void)
 {
@@ -119,7 +138,10 @@ static void teardown_drm(int restore_crtc)
         g_dumb_handle = 0u;
     }
     if (g_drm_fd >= 0) {
-        close(g_drm_fd);
+        if (g_drm_device_id >= 0) {
+            gem_freebsd_seat_close_device(g_drm_device_id);
+            g_drm_device_id = -1;
+        }
         g_drm_fd = -1;
     }
 }
@@ -151,6 +173,10 @@ static void teardown_drm(int restore_crtc)
  * GEM_FREEBSD_DRM_POWERCYCLES if a different machine needs more (or
  * fewer, though 1 is not recommended given the evidence).
  */
+static void power_cycle_gpu_device(void);
+static void freebsd_raster_seat_enable(void);
+static void freebsd_raster_seat_disable(void);
+
 static void power_cycle_gpu_device(void)
 {
     const char *device = getenv("GEM_FREEBSD_DRM_DEVCTL");
@@ -206,8 +232,8 @@ int gem_raster_init(uint16_t width, uint16_t height, gem_raster_format_t format)
         return 0;
     }
 
-    g_drm_fd = open(drm_device_path(), O_RDWR | O_CLOEXEC);
-    if (g_drm_fd < 0) {
+    g_drm_device_id = gem_freebsd_seat_open_device(drm_device_path(), &g_drm_fd);
+    if (g_drm_device_id < 0) {
         return 0;
     }
 
@@ -288,6 +314,8 @@ int gem_raster_init(uint16_t width, uint16_t height, gem_raster_format_t format)
                        1, &conn->modes[0]) < 0) {
         goto fail;
     }
+    g_current_mode = conn->modes[0];
+    g_have_current_mode = 1;
 
     pitch = ((size_t)width + 7u) / 8u;
     if (pitch > UINT16_MAX) {
@@ -304,6 +332,9 @@ int gem_raster_init(uint16_t width, uint16_t height, gem_raster_format_t format)
     g_surface.pitch = (uint16_t)pitch;
     g_surface.format = format;
     ok = 1;
+    g_have_init_time = (clock_gettime(CLOCK_MONOTONIC, &g_init_time) == 0);
+    gem_freebsd_seat_set_raster_hooks(freebsd_raster_seat_enable,
+                                      freebsd_raster_seat_disable);
 
 fail:
     if (enc != NULL) {
@@ -334,6 +365,105 @@ void gem_raster_shutdown(void)
     memset(&g_surface, 0, sizeof(g_surface));
     g_dumb_pitch = 0u;
     g_power_cycled_after_first_content = 0;
+    g_have_init_time = 0;
+    g_have_current_mode = 0;
+}
+
+/*
+ * gem-freebsd-libseat: narrower teardown/reacquire pair used on
+ * disable_seat/enable_seat (e.g. a VT switch away/back), distinct from
+ * the full gem_raster_init()/gem_raster_shutdown() pair -- keeps the
+ * shadow buffer (g_surface) and remembered mode/connector/crtc state
+ * intact so re-acquiring is cheap and doesn't need a full re-init.
+ *
+ * Deliberately does NOT touch g_saved_crtc (the PRE-GEM display state,
+ * only used by the real gem_raster_shutdown() at process exit) -- on a
+ * VT switch, the other session sets its own mode; there's nothing for
+ * this process to restore to on disable.
+ */
+static void freebsd_raster_seat_disable(void)
+{
+    if (g_fb_id != 0u && g_drm_fd >= 0) {
+        drmModeRmFB(g_drm_fd, g_fb_id);
+    }
+    g_fb_id = 0u;
+    if (g_dumb_pixels != NULL) {
+        (void)munmap(g_dumb_pixels, g_dumb_size);
+        g_dumb_pixels = NULL;
+    }
+    if (g_dumb_handle != 0u && g_drm_fd >= 0) {
+        struct drm_mode_destroy_dumb dreq;
+
+        memset(&dreq, 0, sizeof(dreq));
+        dreq.handle = g_dumb_handle;
+        (void)drmIoctl(g_drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+    }
+    g_dumb_handle = 0u;
+    if (g_drm_fd >= 0) {
+        if (g_drm_device_id >= 0) {
+            gem_freebsd_seat_close_device(g_drm_device_id);
+            g_drm_device_id = -1;
+        }
+        g_drm_fd = -1;
+    }
+    /*
+     * Redo the "needs a kick to actually start rescanning" workaround
+     * on reacquire too, rather than assuming a VT switch back never
+     * needs it -- not yet confirmed either way on real hardware.
+     */
+    g_power_cycled_after_first_content = 0;
+    g_have_init_time = 0;
+}
+
+static void freebsd_raster_seat_enable(void)
+{
+    struct drm_mode_create_dumb creq;
+    struct drm_mode_map_dumb mreq;
+
+    if (g_surface.pixels == NULL || !g_have_current_mode) {
+        return; /* never successfully initialized -- nothing to reacquire */
+    }
+
+    g_drm_device_id = gem_freebsd_seat_open_device(drm_device_path(), &g_drm_fd);
+    if (g_drm_device_id < 0) {
+        return;
+    }
+
+    memset(&creq, 0, sizeof(creq));
+    creq.width = g_surface.width;
+    creq.height = g_surface.height;
+    creq.bpp = 32u;
+    if (drmIoctl(g_drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0) {
+        return;
+    }
+    g_dumb_handle = creq.handle;
+    g_dumb_pitch = creq.pitch;
+    g_dumb_size = creq.size;
+
+    memset(&mreq, 0, sizeof(mreq));
+    mreq.handle = creq.handle;
+    if (drmIoctl(g_drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq) < 0) {
+        return;
+    }
+    g_dumb_pixels = mmap(NULL, g_dumb_size, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, g_drm_fd, (off_t)mreq.offset);
+    if (g_dumb_pixels == MAP_FAILED) {
+        g_dumb_pixels = NULL;
+        return;
+    }
+    memset(g_dumb_pixels, 0, g_dumb_size);
+
+    if (drmModeAddFB(g_drm_fd, creq.width, creq.height, 24, 32, creq.pitch,
+                     creq.handle, &g_fb_id) < 0) {
+        return;
+    }
+    if (drmModeSetCrtc(g_drm_fd, g_crtc_id, g_fb_id, 0, 0, &g_connector_id, 1,
+                       &g_current_mode) < 0) {
+        return;
+    }
+
+    g_have_init_time = (clock_gettime(CLOCK_MONOTONIC, &g_init_time) == 0);
+    gem_raster_present(); /* re-blit the still-intact shadow buffer */
 }
 
 gem_raster_surface_t *gem_raster_surface(void)
@@ -395,10 +525,22 @@ void gem_raster_present_rect(int x, int y, int width, int height)
      * Deferred, one-time power-cycle: confirmed only reliable once real
      * content has already been drawn and AES has had a chance to finish
      * its real startup drawing (call #1, or even the very first write,
-     * was confirmed NOT sufficient). Deferred to call #30 as an
-     * empirically-confirmed threshold.
+     * was confirmed NOT sufficient). Empirically confirmed via a
+     * `clock`-app test that call #30 is a safe, reliable trigger point
+     * -- but a bare `desktop` (no focused client app) was confirmed to
+     * never generate that much drawing activity on its own, so a
+     * call-count-only trigger would never fire at all in that case.
+     * Add a time-based fallback: once at least a handful of real writes
+     * have happened (so we know real content exists, not just the
+     * initial blank/background fill) AND a couple of seconds have
+     * passed since init, cycle anyway -- whichever condition is met
+     * first. Both thresholds are deliberately conservative, matching
+     * the empirically-confirmed "real content must already exist"
+     * requirement, not just "some time has passed".
      */
-    if (!g_power_cycled_after_first_content && call_count >= 30u) {
+    if (!g_power_cycled_after_first_content &&
+        (call_count >= 30u ||
+         (call_count >= 5u && elapsed_ms_since_init() >= 2000L))) {
         g_power_cycled_after_first_content = 1;
         power_cycle_gpu_device();
         gem_raster_present();

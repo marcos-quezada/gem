@@ -13,6 +13,10 @@
 #include "../aes/aes_shel.h"
 #include "../aes/system_menu.h"
 
+#ifdef GEM_PLATFORM_FREEBSD
+#include "platform/freebsd_seat.h"
+#endif
+
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
@@ -258,6 +262,20 @@ int main(void)
         g_sessions[i].fd = -1;
     }
 
+#ifdef GEM_PLATFORM_FREEBSD
+    /*
+     * Must happen before gemd_init_listener() -- no client can be
+     * accepted (and therefore no client can trigger v_opnvwk, which is
+     * what actually calls gem_raster_init()/gem_hid_init()) until the
+     * seat is ready. gemd is the sole libseat client (design.md).
+     */
+    if (!gem_freebsd_seat_init()) {
+        fprintf(stderr, "gemd: gem_freebsd_seat_init failed: %s\n",
+                strerror(errno));
+        return 1;
+    }
+#endif
+
     if (!gemd_init_listener()) {
         gemd_shutdown();
         return 1;
@@ -283,18 +301,36 @@ int main(void)
          * the mapping exactly once removes the whole class of bug
          * rather than one instance of it.
          */
-        struct pollfd pollfds[GEMD_MAX_SESSIONS + 1];
-        gemd_session_t *poll_owner[GEMD_MAX_SESSIONS + 1];
-        uint64_t poll_generation[GEMD_MAX_SESSIONS + 1];
+        struct pollfd pollfds[GEMD_MAX_SESSIONS + 2];
+        gemd_session_t *poll_owner[GEMD_MAX_SESSIONS + 2];
+        uint64_t poll_generation[GEMD_MAX_SESSIONS + 2];
         nfds_t nfds = 0;
         nfds_t k;
         int rc;
+#ifdef GEM_PLATFORM_FREEBSD
+        nfds_t seat_poll_index = (nfds_t)-1;
+#endif
 
         pollfds[nfds].fd = g_listen_fd;
         pollfds[nfds].events = POLLIN;
         pollfds[nfds].revents = 0;
         poll_owner[nfds] = NULL;
         ++nfds;
+
+#ifdef GEM_PLATFORM_FREEBSD
+        {
+            int seat_fd = gem_freebsd_seat_fd();
+
+            if (seat_fd >= 0) {
+                seat_poll_index = nfds;
+                pollfds[nfds].fd = seat_fd;
+                pollfds[nfds].events = POLLIN;
+                pollfds[nfds].revents = 0;
+                poll_owner[nfds] = NULL;
+                ++nfds;
+            }
+        }
+#endif
 
         for (i = 0; i < GEMD_MAX_SESSIONS; ++i) {
             if (g_sessions[i].fd >= 0) {
@@ -366,6 +402,13 @@ int main(void)
         if ((pollfds[0].revents & POLLIN) != 0) {
             gemd_accept_client();
         }
+
+#ifdef GEM_PLATFORM_FREEBSD
+        if (seat_poll_index != (nfds_t)-1 &&
+            (pollfds[seat_poll_index].revents & POLLIN) != 0) {
+            gem_freebsd_seat_dispatch();
+        }
+#endif
 
         gemd_pump_hid();
     }

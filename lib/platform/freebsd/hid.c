@@ -17,11 +17,11 @@
 #include "keymap.h"
 
 #include "platform/hid.h"
+#include "platform/freebsd_seat.h"
 #include "platform/raster.h"
 
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <dev/evdev/input.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -35,14 +35,42 @@ enum {
     freebsd_bits_per_long = (int)(sizeof(unsigned long) * 8u)
 };
 
+/* gem-freebsd-touchpad-mtslots: generous upper bound for simultaneous MT
+ * slots -- typical touchpad/trackpad hardware limits are far lower
+ * (2-5), sized generously per this project's own established safety
+ * pattern for fixed-size arrays elsewhere in this file. */
+#define GEM_FREEBSD_MT_MAX_SLOTS 10
+
 typedef struct freebsd_hid_device {
     int fd;
+    int device_id;
+    char path[256];
     int has_keyboard;
     int has_pointer;
     struct input_absinfo abs_x;
     struct input_absinfo abs_y;
     int has_abs_x;
     int has_abs_y;
+    /* gem-freebsd-touchpad-relmode: last raw ABS_X/Y or ABS_MT_POSITION_X/Y
+     * reading and whether it's a valid tracking origin (reset on
+     * BTN_TOUCH release) -- only used when GEM_FREEBSD_TOUCHPAD_RELATIVE
+     * is set; independent per-axis, matching has_abs_x/has_abs_y already
+     * being tracked independently. */
+    int last_raw_x;
+    int last_raw_y;
+    int have_raw_origin_x;
+    int have_raw_origin_y;
+    /* gem-freebsd-touchpad-mtslots: MT protocol type B slot tracking.
+     * mt_current_slot/mt_primary_slot both default to 0 so hardware
+     * that never sends ABS_MT_SLOT/ABS_MT_TRACKING_ID at all behaves
+     * identically to before this change (the mt_current_slot ==
+     * mt_primary_slot check trivially passes at 0==0 forever). Confirmed
+     * on real hardware: a clickpad's button press genuinely introduces
+     * a second, simultaneous slot -- this exists to keep cursor
+     * position tracking only the originally-primary finger. */
+    int mt_current_slot;
+    int mt_primary_slot;
+    int mt_tracking_id[GEM_FREEBSD_MT_MAX_SLOTS];
 } freebsd_hid_device_t;
 
 static freebsd_hid_device_t g_devices[freebsd_hid_max_devices];
@@ -95,7 +123,7 @@ static void close_devices(void)
         if (option_enabled("GEM_FREEBSD_GRAB")) {
             (void)ioctl(g_devices[index].fd, EVIOCGRAB, 0);
         }
-        (void)close(g_devices[index].fd);
+        gem_freebsd_seat_close_device(g_devices[index].device_id);
     }
     memset(g_devices, 0, sizeof(g_devices));
     g_device_count = 0u;
@@ -109,19 +137,20 @@ static int add_device(const char *path)
         key_bits[(KEY_MAX + freebsd_bits_per_long) / freebsd_bits_per_long];
     freebsd_hid_device_t *device;
     int fd;
+    int device_id;
 
     if (g_device_count >= freebsd_hid_max_devices) {
         return 0;
     }
-    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) {
+    device_id = gem_freebsd_seat_open_device(path, &fd);
+    if (device_id < 0) {
         return 0;
     }
 
     memset(event_bits, 0, sizeof(event_bits));
     memset(key_bits, 0, sizeof(key_bits));
     if (ioctl(fd, EVIOCGBIT(0, sizeof(event_bits)), event_bits) < 0) {
-        (void)close(fd);
+        gem_freebsd_seat_close_device(device_id);
         return 0;
     }
     if (bit_is_set(event_bits, EV_KEY)) {
@@ -131,6 +160,8 @@ static int add_device(const char *path)
     device = &g_devices[g_device_count];
     memset(device, 0, sizeof(*device));
     device->fd = fd;
+    device->device_id = device_id;
+    (void)snprintf(device->path, sizeof(device->path), "%s", path);
     device->has_keyboard = bit_is_set(event_bits, EV_KEY) &&
                            bit_is_set(key_bits, KEY_A) &&
                            bit_is_set(key_bits, KEY_ENTER);
@@ -140,7 +171,7 @@ static int add_device(const char *path)
         (bit_is_set(key_bits, BTN_LEFT) || bit_is_set(key_bits, BTN_TOUCH) ||
          bit_is_set(key_bits, BTN_MOUSE));
     if (!device->has_keyboard && !device->has_pointer) {
-        (void)close(fd);
+        gem_freebsd_seat_close_device(device_id);
         return 0;
     }
 
@@ -195,12 +226,12 @@ static int add_device(const char *path)
      */
     if (device->has_pointer && !device->has_abs_x && !device->has_abs_y &&
         g_have_abs_pointer && !option_enabled("GEM_FREEBSD_KEEP_REL_MOUSE")) {
-        (void)close(fd);
+        gem_freebsd_seat_close_device(device_id);
         memset(device, 0, sizeof(*device));
         return 0;
     }
     if (option_enabled("GEM_FREEBSD_GRAB") && ioctl(fd, EVIOCGRAB, 1) < 0) {
-        (void)close(fd);
+        gem_freebsd_seat_close_device(device_id);
         memset(device, 0, sizeof(*device));
         return 0;
     }
@@ -273,6 +304,26 @@ static int translate_key(gem_hid_event_t *event,
         g_caps_lock = !g_caps_lock;
     }
 
+    /*
+     * VT-switch hotkey (gem-freebsd-libseat): under the real libseat
+     * architecture, seatd/the kernel do NOT intercept Ctrl+Alt+Fn on our
+     * behalf the way old-style vt(4) console switching did -- the
+     * compositor is expected to recognize the combo itself and request
+     * the switch explicitly via libseat_switch_session(). Confirmed via
+     * a real VT-switch test: without this, the keypress reached GEM's
+     * own keyboard translation as an ordinary keystroke and nothing else
+     * happened. Swallow the event here (don't dispatch it to AES as a
+     * normal keypress) once recognized.
+     */
+    if (pressed && input->code >= KEY_F1 && input->code <= KEY_F12 &&
+        (g_modifiers & (uint16_t)(gem_mod_ctrl | gem_mod_alt)) ==
+            (uint16_t)(gem_mod_ctrl | gem_mod_alt)) {
+        int vt = (int)(input->code - KEY_F1) + 1;
+
+        (void)gem_freebsd_seat_switch_session(vt);
+        return 0;
+    }
+
     memset(event, 0, sizeof(*event));
     event->type = GEM_HID_KEY;
     event->flags = (uint16_t)(pressed ? 1u : 0u);
@@ -300,13 +351,38 @@ static uint16_t button_for_code(uint16_t code)
     }
 }
 
-static int translate_button(gem_hid_event_t *event,
+static int translate_button(freebsd_hid_device_t *device,
+                            gem_hid_event_t *event,
                             const struct input_event *input)
 {
     uint16_t button = button_for_code(input->code);
 
     if (button == 0u) {
         return 0;
+    }
+    if (input->code == BTN_TOUCH) {
+        if (input->value == 0) {
+            /* gem-freebsd-touchpad-relmode: a fresh touch-down after
+             * this reset is treated as a new origin, not a jump against
+             * a stale, pre-lift position -- see translate_pointer(). */
+            device->have_raw_origin_x = 0;
+            device->have_raw_origin_y = 0;
+        }
+        /*
+         * BTN_TOUCH doubles as "finger is on the pad" and, by tap-to-
+         * click convention, "left button pressed". That's fine in
+         * absolute mode (one touch-down = one intended click), but in
+         * relative mode a single cursor movement often needs multiple
+         * lift+reposition cycles, and each fresh touch-down would
+         * otherwise re-fire as a button press mid-gesture (confirmed on
+         * real hardware: touching down near a window border and moving
+         * away dragged the window unintentionally). Suppress tap-to-
+         * click specifically in relative mode -- physical buttons
+         * (BTN_LEFT etc., a separate evdev code) are unaffected.
+         */
+        if (option_enabled("GEM_FREEBSD_TOUCHPAD_RELATIVE")) {
+            return 0;
+        }
     }
     if (input->value != 0) {
         g_buttons = (uint16_t)(g_buttons | button);
@@ -341,6 +417,42 @@ static int translate_pointer(freebsd_hid_device_t *device, gem_hid_event_t *even
     int old_y = g_mouse_y;
     int max_x;
     int max_y;
+    int touchpad_relative = option_enabled("GEM_FREEBSD_TOUCHPAD_RELATIVE");
+
+    if (input->type == EV_ABS && input->code == ABS_MT_SLOT) {
+        /* gem-freebsd-touchpad-mtslots: pure bookkeeping, no event. */
+        int slot = input->value;
+
+        if (slot < 0) {
+            slot = 0;
+        } else if (slot >= GEM_FREEBSD_MT_MAX_SLOTS) {
+            slot = GEM_FREEBSD_MT_MAX_SLOTS - 1;
+        }
+        device->mt_current_slot = slot;
+        return 0;
+    }
+    if (input->type == EV_ABS && input->code == ABS_MT_TRACKING_ID) {
+        int slot = device->mt_current_slot;
+
+        if (input->value < 0) {
+            /* This slot's finger lifted. */
+            device->mt_tracking_id[slot] = -1;
+            if (device->mt_primary_slot == slot) {
+                /* Primary finger lifted -- the next slot to touch down
+                 * becomes primary. -1 is an explicit "none assigned
+                 * yet" sentinel, distinct from the default 0. */
+                device->mt_primary_slot = -1;
+            }
+        } else {
+            device->mt_tracking_id[slot] = input->value;
+            if (device->mt_primary_slot < 0) {
+                /* No primary currently assigned -- this new touch
+                 * becomes the cursor-tracking finger. */
+                device->mt_primary_slot = slot;
+            }
+        }
+        return 0;
+    }
 
     if (surface == NULL) {
         return 0;
@@ -358,16 +470,68 @@ static int translate_pointer(freebsd_hid_device_t *device, gem_hid_event_t *even
                (input->code == ABS_X || input->code == ABS_MT_POSITION_X) &&
                device->has_abs_x &&
                device->abs_x.maximum != device->abs_x.minimum) {
-        g_mouse_x =
-            (int16_t)(((int64_t)input->value - device->abs_x.minimum) * max_x /
-                      (device->abs_x.maximum - device->abs_x.minimum));
+        /*
+         * gem-freebsd-touchpad-mtslots: ABS_X has no slot concept (it's
+         * the legacy single-touch axis, always applies); only gate
+         * ABS_MT_POSITION_X on slot ownership. Confirmed on real
+         * hardware: a clickpad button press introduces a second,
+         * simultaneous MT slot whose position data must NOT move the
+         * cursor.
+         */
+        if (input->code == ABS_MT_POSITION_X &&
+            device->mt_current_slot != device->mt_primary_slot) {
+            return 0;
+        }
+        if (touchpad_relative) {
+            /*
+             * gem-freebsd-touchpad-relmode: track a delta against this
+             * device's own last raw reading instead of an absolute
+             * remap, so a physically-unreachable region of the sensing
+             * surface (e.g. a fingerprint reader) doesn't make part of
+             * the screen unreachable. The first reading after an origin
+             * reset (BTN_TOUCH release -> next touch-down) establishes
+             * a new origin and produces zero movement, rather than a
+             * jump against a stale, pre-lift position.
+             */
+            if (device->have_raw_origin_x) {
+                int delta = input->value - device->last_raw_x;
+
+                g_mouse_x = clamp_coordinate(g_mouse_x + delta * g_rel_scale,
+                                            max_x);
+            }
+            device->last_raw_x = input->value;
+            device->have_raw_origin_x = 1;
+        } else {
+            g_mouse_x = (int16_t)(((int64_t)input->value -
+                                   device->abs_x.minimum) *
+                                  max_x /
+                                  (device->abs_x.maximum -
+                                   device->abs_x.minimum));
+        }
     } else if (input->type == EV_ABS &&
                (input->code == ABS_Y || input->code == ABS_MT_POSITION_Y) &&
                device->has_abs_y &&
                device->abs_y.maximum != device->abs_y.minimum) {
-        g_mouse_y =
-            (int16_t)(((int64_t)input->value - device->abs_y.minimum) * max_y /
-                      (device->abs_y.maximum - device->abs_y.minimum));
+        if (input->code == ABS_MT_POSITION_Y &&
+            device->mt_current_slot != device->mt_primary_slot) {
+            return 0;
+        }
+        if (touchpad_relative) {
+            if (device->have_raw_origin_y) {
+                int delta = input->value - device->last_raw_y;
+
+                g_mouse_y = clamp_coordinate(g_mouse_y + delta * g_rel_scale,
+                                            max_y);
+            }
+            device->last_raw_y = input->value;
+            device->have_raw_origin_y = 1;
+        } else {
+            g_mouse_y = (int16_t)(((int64_t)input->value -
+                                   device->abs_y.minimum) *
+                                  max_y /
+                                  (device->abs_y.maximum -
+                                   device->abs_y.minimum));
+        }
     } else {
         return 0;
     }
@@ -390,13 +554,63 @@ static int translate_event(freebsd_hid_device_t *device, gem_hid_event_t *event,
         return translate_key(event, input);
     }
     if (input->type == EV_KEY && device->has_pointer) {
-        return translate_button(event, input);
+        return translate_button(device, event, input);
     }
     if ((input->type == EV_REL || input->type == EV_ABS) &&
         device->has_pointer) {
         return translate_pointer(device, event, input);
     }
     return 0;
+}
+
+/*
+ * gem-freebsd-libseat: narrower disable/enable pair used on
+ * disable_seat/enable_seat (e.g. a VT switch away/back). Unlike
+ * close_devices()/gem_hid_init(), this does NOT re-scan /dev/input or
+ * touch g_device_count/calibration state -- it closes and reopens
+ * exactly the same devices already discovered, using each device's own
+ * remembered path.
+ */
+static void freebsd_hid_seat_disable(void)
+{
+    size_t index;
+
+    for (index = 0u; index < g_device_count; ++index) {
+        if (g_devices[index].fd < 0) {
+            continue;
+        }
+        if (option_enabled("GEM_FREEBSD_GRAB")) {
+            (void)ioctl(g_devices[index].fd, EVIOCGRAB, 0);
+        }
+        gem_freebsd_seat_close_device(g_devices[index].device_id);
+        g_devices[index].fd = -1;
+        g_devices[index].device_id = -1;
+    }
+}
+
+static void freebsd_hid_seat_enable(void)
+{
+    size_t index;
+
+    for (index = 0u; index < g_device_count; ++index) {
+        int fd;
+        int device_id;
+
+        if (g_devices[index].fd >= 0 || g_devices[index].path[0] == '\0') {
+            continue; /* already open, or never had a real path (shouldn't
+                       * happen for anything counted in g_device_count) */
+        }
+        device_id = gem_freebsd_seat_open_device(g_devices[index].path, &fd);
+        if (device_id < 0) {
+            continue; /* leave fd=-1; gem_hid_poll's read loop tolerates a
+                       * closed fd (read() just fails, no crash) */
+        }
+        g_devices[index].fd = fd;
+        g_devices[index].device_id = device_id;
+        if (option_enabled("GEM_FREEBSD_GRAB")) {
+            (void)ioctl(fd, EVIOCGRAB, 1);
+        }
+    }
 }
 
 int gem_hid_init(void)
@@ -442,7 +656,7 @@ int gem_hid_init(void)
                 if (option_enabled("GEM_FREEBSD_GRAB")) {
                     (void)ioctl(device->fd, EVIOCGRAB, 0);
                 }
-                (void)close(device->fd);
+                gem_freebsd_seat_close_device(device->device_id);
                 continue;
             }
             if (out != index) {
@@ -461,6 +675,8 @@ int gem_hid_init(void)
     g_modifiers = 0u;
     g_caps_lock = 0;
     g_next_device = 0u;
+    gem_freebsd_seat_set_hid_hooks(freebsd_hid_seat_enable,
+                                  freebsd_hid_seat_disable);
     return g_device_count != 0u;
 }
 

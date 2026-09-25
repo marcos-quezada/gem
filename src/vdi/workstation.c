@@ -19,6 +19,7 @@
 #include "platform/raster.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -65,12 +66,20 @@ VOID v_opnvwk(WORD work_in[11], VDI_HANDLE *handle, WORD work_out[57])
         }
         if (!gem_raster_init((uint16_t)width, (uint16_t)height,
                              GEM_RASTER_MONO1)) {
+            fprintf(stderr,
+                    "v_opnvwk: gem_raster_init failed -- no display, "
+                    "workstation cannot open\n");
             gem_os_shutdown();
             vdi_unload_fonts();
             *handle = 0;
             return;
         }
-        (void)gem_hid_init();
+        if (!gem_hid_init()) {
+            fprintf(stderr,
+                    "v_opnvwk: gem_hid_init failed -- opening with zero "
+                    "input devices, mouse/keyboard will not work until "
+                    "this is investigated\n");
+        }
         gem_os_sleep_ms(20u);
         (void)gem_raster_resync();
         gem_os_sleep_ms(20u);
