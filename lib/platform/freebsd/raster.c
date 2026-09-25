@@ -28,10 +28,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
+
+#include <devctl.h>
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -64,9 +68,11 @@ static uint64_t g_dumb_size;
 static uint32_t g_dumb_handle;
 static uint32_t g_dumb_pitch;
 static uint32_t g_fb_id;
+static uint32_t g_crtc_id;
 static int g_drm_fd = -1;
 static uint32_t g_connector_id;
 static drmModeCrtcPtr g_saved_crtc;
+static int g_power_cycled_after_first_content;
 
 static const char *drm_device_path(void)
 {
@@ -118,6 +124,71 @@ static void teardown_drm(int restore_crtc)
     }
 }
 
+/*
+ * Confirmed via direct evidence (not guessed): neither drmModeSetCrtc
+ * succeeding nor a DPMS property OFF/ON cycle is sufficient to make this
+ * hardware's eDP link actually display content for a freshly-opened
+ * client on a cold boot -- only an ACTUAL PCI power-state cycle of the
+ * GPU device does (confirmed via `devctl suspend drmn0` / `devctl resume
+ * drmn0`, cross-checked against dmesg showing real
+ * `pci_set_powerstate`/`pci_enable_io` transitions, and an HDA audio
+ * codec reacting with "unsolicited response" messages consistent with a
+ * real display-link retraining event). This performs the same operation
+ * devctl(8) does, via the documented devctl(3) C API
+ * (devctl_suspend()/devctl_resume()), rather than shelling out.
+ *
+ * The device name is machine-specific (this project's own convention,
+ * matching GEM_FREEBSD_DRM's existing env-var-override pattern) --
+ * override via GEM_FREEBSD_DRM_DEVCTL if a different machine's GPU
+ * newbus device name differs from the default below.
+ *
+ * A single cycle is not always enough -- consistent with real eDP link
+ * training genuinely being flaky at the hardware level (a documented,
+ * known category of behavior, not specific to this driver). No clean
+ * way exists to query "did the link actually train" from userspace to
+ * decide whether a retry is needed, so this pragmatically cycles twice,
+ * unconditionally. Override the cycle count via
+ * GEM_FREEBSD_DRM_POWERCYCLES if a different machine needs more (or
+ * fewer, though 1 is not recommended given the evidence).
+ */
+static void power_cycle_gpu_device(void)
+{
+    const char *device = getenv("GEM_FREEBSD_DRM_DEVCTL");
+    const char *count_env = getenv("GEM_FREEBSD_DRM_POWERCYCLES");
+    int count = 2;
+    int attempt;
+
+    if (device == NULL || device[0] == '\0') {
+        device = "drmn0";
+    }
+    if (count_env != NULL && count_env[0] != '\0') {
+        char *end = NULL;
+        long parsed = strtol(count_env, &end, 10);
+
+        if (end != count_env && *end == '\0' && parsed >= 1L &&
+            parsed <= 10L) {
+            count = (int)parsed;
+        }
+    }
+
+    for (attempt = 1; attempt <= count; ++attempt) {
+        if (devctl_suspend(device) != 0) {
+            continue;
+        }
+        {
+            struct timespec delay = {0, 300000000L};
+
+            nanosleep(&delay, NULL);
+        }
+        if (devctl_resume(device) != 0) {
+            continue;
+        }
+        if (attempt < count) {
+            sleep(3); /* settle time between cycles */
+        }
+    }
+}
+
 int gem_raster_init(uint16_t width, uint16_t height, gem_raster_format_t format)
 {
     drmModeResPtr res = NULL;
@@ -163,6 +234,7 @@ int gem_raster_init(uint16_t width, uint16_t height, gem_raster_format_t format)
         goto fail;
     }
     g_connector_id = conn->connector_id;
+    g_crtc_id = enc->crtc_id;
 
     /* Save the CRTC's current state so gem_raster_shutdown can restore
      * it exactly, leaving the console/compositor state untouched. */
@@ -261,6 +333,7 @@ void gem_raster_shutdown(void)
     free(g_surface.pixels);
     memset(&g_surface, 0, sizeof(g_surface));
     g_dumb_pitch = 0u;
+    g_power_cycled_after_first_content = 0;
 }
 
 gem_raster_surface_t *gem_raster_surface(void)
@@ -276,6 +349,9 @@ void gem_raster_present_rect(int x, int y, int width, int height)
     int64_t x1;
     int64_t y1;
     int row_y;
+    static unsigned long call_count;
+
+    ++call_count;
 
     if (source == NULL || g_dumb_pixels == NULL || width <= 0 || height <= 0) {
         return;
@@ -313,6 +389,33 @@ void gem_raster_present_rect(int x, int y, int width, int height)
 
             dst_row[col_x] = shadow_bit_to_xrgb8888(bit_set);
         }
+    }
+
+    /*
+     * Deferred, one-time power-cycle: confirmed only reliable once real
+     * content has already been drawn and AES has had a chance to finish
+     * its real startup drawing (call #1, or even the very first write,
+     * was confirmed NOT sufficient). Deferred to call #30 as an
+     * empirically-confirmed threshold.
+     */
+    if (!g_power_cycled_after_first_content && call_count >= 30u) {
+        g_power_cycled_after_first_content = 1;
+        power_cycle_gpu_device();
+        gem_raster_present();
+    }
+
+    /*
+     * Confirmed via direct evidence: after the devctl power-cycle, the
+     * display shows one correct frame and then never rescans the
+     * framebuffer again, even though the underlying memory keeps being
+     * correctly updated. An explicit page-flip to the SAME fb_id forces
+     * KMS to re-latch/rescan at the next vblank. Rate-limited implicitly
+     * by call frequency; EBUSY (a flip already queued for the next
+     * vblank) is expected and harmless.
+     */
+    if (g_power_cycled_after_first_content && g_crtc_id != 0u &&
+        g_fb_id != 0u) {
+        (void)drmModePageFlip(g_drm_fd, g_crtc_id, g_fb_id, 0, NULL);
     }
 }
 

@@ -145,8 +145,47 @@ static int add_device(const char *path)
     }
 
     if (bit_is_set(event_bits, EV_ABS)) {
-        device->has_abs_x = ioctl(fd, EVIOCGABS(ABS_X), &device->abs_x) == 0;
-        device->has_abs_y = ioctl(fd, EVIOCGABS(ABS_Y), &device->abs_y) == 0;
+        struct input_absinfo legacy_x;
+        struct input_absinfo legacy_y;
+        struct input_absinfo mt_x;
+        struct input_absinfo mt_y;
+        int have_legacy_x = ioctl(fd, EVIOCGABS(ABS_X), &legacy_x) == 0;
+        int have_legacy_y = ioctl(fd, EVIOCGABS(ABS_Y), &legacy_y) == 0;
+        int have_mt_x = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &mt_x) == 0;
+        int have_mt_y = ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &mt_y) == 0;
+
+        /*
+         * Some touchpads report a legacy ABS_X/ABS_Y ioctl that succeeds
+         * but returns a degenerate range (min == max -- no real
+         * calibration data on that axis), while continuous position data
+         * actually lives entirely on the multi-touch "protocol type B"
+         * axes (ABS_MT_POSITION_X/Y). Query both, unconditionally, and
+         * prefer whichever has a real (non-degenerate) range, rather than
+         * only falling back to MT if the legacy query outright fails.
+         *
+         * GEM has no concept of multi-touch gestures, so this deliberately
+         * does not implement real MT-B slot tracking -- it just treats
+         * ABS_MT_POSITION_X/Y as equivalent inputs to ABS_X/Y for a
+         * single-pointer model.
+         */
+        if (have_mt_x && mt_x.maximum != mt_x.minimum) {
+            device->has_abs_x = 1;
+            device->abs_x = mt_x;
+        } else if (have_legacy_x && legacy_x.maximum != legacy_x.minimum) {
+            device->has_abs_x = 1;
+            device->abs_x = legacy_x;
+        } else {
+            device->has_abs_x = 0;
+        }
+        if (have_mt_y && mt_y.maximum != mt_y.minimum) {
+            device->has_abs_y = 1;
+            device->abs_y = mt_y;
+        } else if (have_legacy_y && legacy_y.maximum != legacy_y.minimum) {
+            device->has_abs_y = 1;
+            device->abs_y = legacy_y;
+        } else {
+            device->has_abs_y = 0;
+        }
     }
 
     /*
@@ -315,13 +354,15 @@ static int translate_pointer(freebsd_hid_device_t *device, gem_hid_event_t *even
     } else if (input->type == EV_REL && input->code == REL_Y) {
         g_mouse_y =
             clamp_coordinate(g_mouse_y + input->value * g_rel_scale, max_y);
-    } else if (input->type == EV_ABS && input->code == ABS_X &&
+    } else if (input->type == EV_ABS &&
+               (input->code == ABS_X || input->code == ABS_MT_POSITION_X) &&
                device->has_abs_x &&
                device->abs_x.maximum != device->abs_x.minimum) {
         g_mouse_x =
             (int16_t)(((int64_t)input->value - device->abs_x.minimum) * max_x /
                       (device->abs_x.maximum - device->abs_x.minimum));
-    } else if (input->type == EV_ABS && input->code == ABS_Y &&
+    } else if (input->type == EV_ABS &&
+               (input->code == ABS_Y || input->code == ABS_MT_POSITION_Y) &&
                device->has_abs_y &&
                device->abs_y.maximum != device->abs_y.minimum) {
         g_mouse_y =

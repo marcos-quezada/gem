@@ -42,7 +42,7 @@ target_include_directories(calc_gemd
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(calc_gemd PRIVATE gem)
+target_link_libraries(calc_gemd PRIVATE gem m)
 
 set_target_properties(calc_gemd PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${GEM_APPS_DIR}

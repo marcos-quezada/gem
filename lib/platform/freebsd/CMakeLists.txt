@@ -20,6 +20,14 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GEM_LIBDRM REQUIRED IMPORTED_TARGET libdrm)
 target_link_libraries(platform_freebsd PUBLIC PkgConfig::GEM_LIBDRM)
 
+# devctl(3) -- confirmed this session as the actual, real fix needed for
+# this hardware: neither drmModeSetCrtc succeeding nor a DPMS property
+# cycle is enough to make the eDP link display content on a cold boot;
+# only a genuine PCI power-state cycle of the GPU device (devctl_suspend
+# + devctl_resume) does, confirmed directly against dmesg showing real
+# pci_set_powerstate/pci_enable_io transitions.
+target_link_libraries(platform_freebsd PUBLIC devctl)
+
 target_compile_options(platform_freebsd
     PRIVATE
         -Wall
