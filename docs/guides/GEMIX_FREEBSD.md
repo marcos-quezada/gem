@@ -143,6 +143,24 @@ real newbus device).
   keyboard has been observed stuck in a raw/scancode mode (every
   keystroke prefixed with an ESC character) until switching to a
   different VT and back. Root cause not yet confirmed.
+- **`terminal`'s VDI text rendering only supports GEM's classic
+  bitmap/Atari charset**, confirmed via `vst_font(vdi_handle, ATARI)` in
+  `src/apps/terminal/main.c` -- not a full Unicode-capable renderer.
+  Nerd Font/powerline glyphs (private-use-area Unicode code points) in
+  a normal shell prompt will not render; use a plain-ASCII prompt
+  fallback inside GEM's terminal rather than expecting a Nerd-Font-based
+  prompt to work there.
+
+## Launching applications from within the desktop
+
+There is no separate launcher or program menu -- the file browser's
+double-click-to-run (`shel_write()`, the classic GEM "Application
+Program Start" mechanism) is the only in-desktop launch mechanism.
+Any executable file counts as launchable (checked via
+`desktop_browser_name_is_app()`: not a `.so`/`.a`/`.o`, not literally
+named `gemd`, doesn't contain `_hosted` in its name), no special
+extension required. Navigate the file browser to `bin/apps/` and
+double-click `clock`, `calc`, `terminal`, or `desktop` directly.
 
 ## Launching: `gem-launch`
 
